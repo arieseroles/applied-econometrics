@@ -1,0 +1,3137 @@
+---
+title: "Analyzing the Philippine Stock Exchange Index: An Econometric Approach"
+subtitle: "A Project in Applied Econometrics Using R"
+author: "Aries Eroles"
+institution: "UA&P"
+date: "August 3, 2024"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_notebook:
+    df_print: paged
+bibliography: references.bib
+runtime: shiny
+---
+
+```{css CSS styling, echo=FALSE}
+body {
+  font-family:'Arial',sans-serif;
+  font-size: 11pt;
+  text-align: justify;
+  max-width: 900px;
+}
+
+h1 {
+  font-family: 'Georgia', serif;
+  font-size: 14pt;
+  font-weight: bold;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+h2 {
+  font-family: 'Arial', sans-serif;
+  font-size: 12pt;
+  font-weight: bold;
+  text-align: left;
+  color: black;
+  text-transform: uppercase;
+}
+
+
+h3 {
+  font-family: 'Arial', sans-serif;
+  font-size: 11pt;
+  font-weight: bold;
+  text-decoration: underline;
+  text-transform: uppercase;
+  text-align: left;
+  color: grey;
+}
+
+a:link {
+  color:blue;
+}
+
+a:hover{
+  text-decoration: underline;
+}
+
+hr {
+  border-top: 2px solid grey;
+}
+```
+
+```{r Libraries, echo=FALSE, message = FALSE}
+# Library used
+library(fredr)
+library(wbstats)
+library(ggplot2)
+library(quantmod)
+library(xts)
+library(gridExtra)
+library(purrr)
+library(ggpubr)
+library(olsrr)
+library(corrplot)
+library(plotly)
+library(latex2exp)
+library(tufte)
+library(lubridate)
+library(scales)
+library(relaimpo)
+library(dplyr)
+library(tidyverse)
+```
+
+```{r r4abep script, echo = FALSE, warning = FALSE, message = FALSE}
+# Load r4abep.R
+source("Functions\\r4abep.R") 
+```
+
+```{r Gross Domestic Product Data, include=FALSE}
+
+# Quarterly data, growth rates are Year-on-Year per quarter
+
+# -- Columns: Date, NGDP (millions PHP), RGDP (millions PHP), dNGDP (%), dRGDP (%)
+
+GDP_raw <- read_excel("Data\\PHL.xlsx",sheet = "GDP")
+
+GDP_raw$Date <- as.Date(GDP_raw$Date)
+
+# Add a new column for technical recession; two consecutive negative quarters
+
+GDP_raw <- GDP_raw %>%
+  mutate(
+    NegdGDP = if_else(dRGDP < 0, 1, 0), # Create a column indicating negative GDP growth
+    Recession = if_else(
+      (lag(NegdGDP, 1, default = 0) == 1 & NegdGDP == 1) | 
+      (NegdGDP == 1 & lead(NegdGDP, 1, default = 0) == 1), 
+      1, 0 # Check if current, previous, or next quarter is negative
+      ))
+
+# -- Select quarters with technical recession
+
+Recession_quarters <- GDP_raw %>%
+  filter(Recession == 1)
+
+# -- Select quarters with technical recession
+
+Recession_quarters_2005 <- Recession_quarters %>%
+  filter(as.Date(Date) >= as.Date("2005-01-01"))
+
+recession_start <- as.Date(c("1983-12-31","1991-06-30","2020-03-31"))
+
+recession_end <- as.Date(c("1985-12-31","1991-09-30","2021-03-31"))
+
+recession_periods <- data.frame(
+  Start = as.Date(recession_start),
+  End = as.Date(recession_end))
+```
+
+```{r CPI and Inflation Data, include=FALSE}
+# Monthly inflation rates, in %, 2018 = 100
+
+# -- Columns: Date, Inflation (%), CPI
+
+INF_m <- read_excel("Data\\PHL.xlsx",sheet = "Inflation_Monthly")
+
+INF_m$Date <- as.Date(INF_m$Date)
+
+# Calculating price level changes month-on-month; as alternative to year-on-year inflation
+
+INF_m$MOM_Rate <- ((INF_m$CPI / lag(INF_m$CPI,1)) - 1)*100
+
+# Calculating quarterly year-on-year inflation rates, in %, by comparing present quarter with same period last year 
+
+INF_m$Inf_Quarter <- ((INF_m$CPI / lag(INF_m$CPI,12)) - 1)*100
+```
+
+```{r Selected Domestic Interest Rates Data, include = FALSE}
+# Monthly domestic interest rates
+
+DIR <- read_excel("Data\\DIR.xlsx")
+
+DIR$Date <- as.Date(DIR$Date)
+
+# Average monthly yield of Treasury Bill for all maturities
+
+DIR$Tbill_All <- as.numeric(DIR$Tbill_All)
+
+# Average monthly rate of IBCL - Interbank Call Rate
+
+DIR$IBCL <- as.numeric(DIR$IBCL)
+```
+
+```{r OFW Remittances Data, include = FALSE}
+# Monthly remittances, in thousands USD
+
+# Columns: Date, Remittance (USD '000)
+
+Remit_m <- read_excel("Data\\PHL.xlsx",sheet = "Remit_Monthly")
+
+# Dividing Remittance by 1,000,000 to convert into billions
+
+Remit_m$Remittance <- Remit_m$Remittance/1000000
+
+# Adding new column for year-on-year growth rates
+
+Remit_m$dRemit <- ((Remit_m$Remittance / lag(Remit_m$Remittance,12))-1) * 100
+```
+
+```{r PHPUSD Exchange Rate Data, include = FALSE}
+# Monthly averages and end-period exchange rate, PHP = 1 USD
+
+# -- Columns: Date, Average, `End-of-Period`
+
+PHPUSD_m <- read_excel("Data\\PHL.xlsx",sheet = "PHPUSD_Monthly")
+
+# -- Create new columns for the year-on-year growth rates
+
+PHPUSD_m$dyAve <- ((PHPUSD_m$Average / lag(PHPUSD_m$Average,12))-1) * 100
+
+PHPUSD_m$dyEnd <- ((PHPUSD_m$`End-of-Period` / lag(PHPUSD_m$`End-of-Period`, 12))-1) * 100
+
+# -- Create new columns for the month-on-month growth rates
+
+PHPUSD_m$dmAve <- ((PHPUSD_m$Average / lag(PHPUSD_m$Average,1))-1) * 100
+
+PHPUSD_m$dmEnd <- ((PHPUSD_m$`End-of-Period` / lag(PHPUSD_m$`End-of-Period`, 1))-1) * 100
+```
+
+```{r Effective Exchange Rate Data, include = FALSE}
+# 1980 = 100, monthly averages
+
+EER <- read_excel("Data\\PHL.xlsx",sheet = "EER")
+
+# Convert date from POSIXct to date
+
+EER$Date <- as.Date(EER$Date)
+```
+
+```{r PSE Index Data, include = FALSE}
+# PSE Monthly data
+
+# -- Columns: Date, Average, `End of Period`, Volume (millions), Value (millions PHP)
+
+PSE_Monthly <- read_excel("Data\\PHL.xlsx",sheet = "PSE_Monthly")
+
+# -- Divide Value and Volume by 1,000 to convert to billions and billions PHP, respectively
+
+PSE_Monthly$Value <- PSE_Monthly$Value/1000
+
+PSE_Monthly$Volume <- PSE_Monthly$Volume/1000
+
+# -- Convert Date from dttm to date
+
+PSE_Monthly$Date <- as.Date(PSE_Monthly$Date)
+
+# -- Calculating for Month-on-month growth rates for the main index
+
+PSE_Monthly$MOM_Rate <- ((PSE_Monthly$Average / lag(PSE_Monthly$Average,1)) - 1)*100
+
+# -- Calculating for Year-on-Year growth rates for the main index
+
+PSE_Monthly$YOY_Rate <- ((PSE_Monthly$Average / lag(PSE_Monthly$Average,12)) - 1)*100
+```
+
+```{r Target RRP Data, include = FALSE}
+# Target RRP, Monthly
+
+# -- Columns : Date, `Target RRP` (%)
+
+TRRP_Monthly <- read_excel("Data\\PHL.xlsx",sheet = "Target RRP_Monthly")
+```
+
+```{r BRENT Data, include = FALSE}
+# Set FRED API Key
+
+fredr_set_key("e06ce490680451bc821eab758feeca5f")
+
+# Getting "Brent Crude Oil Prices" raw data from FRED using fredr / Daily time series
+
+# -- Columns : date, series_id, value, realtime_start, realtime_end
+
+BRENT_raw <- fredr(
+  series_id = "DCOILBRENTEU",
+  observation_start = as.Date("1987-05-20"),
+  observation_end = as.Date("2024-06-10")
+)
+
+# -- Adding new column BRENT.DR for the Daily Returns
+
+BRENT_raw <- BRENT_raw %>%
+  arrange(date) %>%
+  mutate(BRENT.DR = ((value/lag(value))-1)* 100)
+
+# -- Omitting rows with NA - Weekends and holidays
+
+BRENT_clean <- na.omit(BRENT_raw)
+
+# -- Changing column names
+
+colnames(BRENT_clean) <- c("Date", "Series ID", "BRENT", "Start Date", "End Date", "BRENT.DR")
+
+# -- Selecting only relevant columns
+
+BRENT_Daily <- BRENT_clean[,c("Date","BRENT","BRENT.DR")]
+
+# Create a new data frame for the monthly data
+
+# -- Columns : Date, Average, End_of_Period
+
+BRENT_Monthly <- BRENT_Daily %>%
+  mutate(YearMonth = ceiling_date(Date, "month")) %>%
+  group_by(YearMonth) %>%
+  summarise(Date = as.Date(max(Date), "%Y-%m-%d"),
+            Average = mean(BRENT),
+            End_Of_Period = last(BRENT)) %>%
+  dplyr::select(Date, Average, End_Of_Period)
+
+# -- To ensure that dates are in the last calendar day for each month for later matching with other variables
+
+BRENT_Monthly$Date <- ceiling_date(BRENT_Monthly$Date, "month") - days(1)
+
+# -- Added new column for the Year-on-Year and Month-on-Month growth rates
+
+BRENT_Monthly$MOM_Rate <- ((BRENT_Monthly$Average / lag(BRENT_Monthly$Average,1)) - 1)*100
+
+BRENT_Monthly$YOY_Rate <- ((BRENT_Monthly$Average / lag(BRENT_Monthly$Average,12)) - 1)*100
+```
+
+```{r CBOE Volatility Index, include = FALSE}
+# Getting "CBOE Volatility Index" raw data from FRED using fredr / Daily time series
+
+# -- Columns : date, series_id, value, realtime_start, realtime_end
+
+VIX_raw <- fredr(
+  series_id = "VIXCLS",
+  observation_start = as.Date("1990-01-02"),
+  observation_end = as.Date("2024-07-04")
+)
+
+# -- Adding new column BRENT.DR for the Daily Returns
+
+VIX_raw <- VIX_raw %>%
+  arrange(date) %>%
+  mutate(VIX.DR = ((value /lag(value))-1) *100)
+
+# -- Omitting rows with NA - Weekends and holidays
+
+VIX_clean <- na.omit(VIX_raw)
+
+# -- Changing column names
+
+colnames(VIX_clean) <- c("Date", "Series ID", "VIX", "Start Date", "End Date", "VIX.DR")
+
+# -- Selecting only relevant columns
+
+VIX_Daily <- VIX_clean[,c("Date","VIX","VIX.DR")]
+
+# Create a new data frame for the monthly data
+
+# -- Columns : Date, Average, End_of_Period
+
+VIX_Monthly <- VIX_Daily %>%
+  mutate(YearMonth = ceiling_date(Date, "month")) %>%
+  group_by(YearMonth) %>%
+  summarise(Date = as.Date(max(Date), "%Y-%m-%d"),
+            Average = mean(VIX),
+            End_Of_Period = last(VIX)) %>%
+  dplyr::select(Date, Average, End_Of_Period)
+
+# -- To ensure that dates are in the last calendar day for each month for later matching with other variables
+
+VIX_Monthly$Date <- ceiling_date(VIX_Monthly$Date, "month") - days(1)
+
+# -- Added new column for the Year-on-Year and Month-on-Month growth rates
+
+VIX_Monthly$MOM_Rate <- ((VIX_Monthly$Average / lag(VIX_Monthly$Average,1)) - 1)*100
+
+VIX_Monthly$YOY_Rate <- ((VIX_Monthly$Average / lag(VIX_Monthly$Average,12)) - 1)*100
+
+# Add rolling average
+
+VIX_Monthly$MOM_Rate.ma <- rollmean(VIX_Monthly$MOM_Rate, k = 12, fill = NA)
+```
+
+```{r BSP Consumer and Business Expectations Surveys, include = FALSE}
+# Consumer Expectations Survey
+
+# -- Columns : Date, CES_CurrentQ, CES_NextQ, CES_Next12
+
+CES <- read_excel("Data\\BSP_Survey.xlsx", sheet="CES")
+
+# -- Convert to numeric
+
+CES <- CES%>%
+  mutate_at(vars(CES_CurrentQ, CES_NextQ,CES_Next12M), as.numeric)
+
+# Lagged CES_NextQ for scatter plot at later parts
+
+CES$Lagged_CESNextQ <- lag(CES$CES_NextQ) 
+
+# Savings Behavior
+
+Savings <- read_excel("Data\\BSP_Survey.xlsx", sheet="Savings")
+
+# -- Convert to numeric
+
+Savings <- Savings%>%
+  mutate_at(vars(Average,`Low-Income Group`,`Middle-Income Group`,`High-Income Group`), as.numeric)
+
+# Business Expectations Survey
+
+BES <- read_excel("Data\\BSP_Survey.xlsx", sheet="BES")
+
+# -- Convert to numeric
+
+BES <- BES %>%
+  mutate_at(vars(BES_CurrentQ, BES_NextQ,BES_Next12M), as.numeric)
+
+BES$Lagged_BESNextQ <- lag(BES$BES_NextQ) 
+```
+
+```{r US Equity, include = FALSE}
+# Use data from Yahoo Finance, S&P500 (^GSPC)
+
+SP500_raw <- getSymbols('^GSPC',src='yahoo',auto.assign=FALSE, from='1957-03-04', to='2024-06-28')
+
+# -- Omit dates with NA (i.e., weekends, holidays, etc.)
+
+SP500_clean <- na.omit(SP500_raw)
+
+# -- Add dates from the index as a new column
+
+SP500_df <- data.frame(Date = index(SP500_clean), coredata(SP500_clean))
+
+# -- Rename column names
+
+colnames(SP500_df) <- c("Date", "Open", "High", "Low", "Close", "Volume", "Adjusted")
+
+# -- Choose relevant columns, removing other columns
+
+SP500 <- SP500_df[,c("Date", "Close")]
+
+# Add daily returns
+
+SP500 <- SP500 %>%
+  arrange(Date) %>%
+  mutate(SP500.DR = (Close / lag(Close) -1) *100)
+
+# Add a new data frame for the monthly series of S&P 500
+
+SP500_Monthly <- SP500 %>%
+  mutate(YearMonth = floor_date(Date, "month")) %>%
+  group_by(YearMonth) %>%
+  summarise(Date = max(Date),
+            AveClose = mean(Close),
+            EndClose = last(Close)) %>%
+  dplyr::select(Date, AveClose, EndClose)
+
+# -- To ensure that dates are in the last calendar day for each month for later matching with other variables
+
+SP500_Monthly$AveReturn <- (SP500_Monthly$AveClose/lag(SP500_Monthly$AveClose) - 1)*100
+
+SP500_Monthly$Date <- ceiling_date(SP500_Monthly$Date, "month") - days(1)
+```
+
+```{r Gold, include = FALSE}
+# Use data from Yahoo Finance, S&P500 (^GSPC)
+
+GOLD_raw <- getSymbols('GC=F',src='yahoo',auto.assign=FALSE, from='2000-08-30', to='2024-06-28')
+
+# -- Omit dates with NA (i.e., weekends, holidays, etc.)
+
+GOLD_clean <- na.omit(GOLD_raw)
+
+# -- Add dates from the index as a new column
+
+GOLD_df <- data.frame(Date = index(GOLD_clean), coredata(GOLD_clean))
+
+# -- Rename column names
+
+colnames(GOLD_df) <- c("Date", "Open", "High", "Low", "Close", "Volume", "Adjusted")
+
+# -- Choose relevant columns, removing other columns
+
+GOLD <- GOLD_df[,c("Date", "Close")]
+
+# Add daily returns
+
+GOLD <- GOLD %>%
+  arrange(Date) %>%
+  mutate(GOLD.DR = (Close / lag(Close) -1) *100)
+
+# -- Create a new data frame for a monthly data series of Gold Returns
+
+Gold_Monthly <- GOLD %>%
+  mutate(YearMonth = floor_date(Date, "month")) %>%
+  group_by(YearMonth) %>%
+  summarise(Date = max(Date),
+            Average_Close = mean(Close),
+            End_Of_Period = last(GOLD.DR)) %>%
+  dplyr::select(Date, Average_Close, End_Of_Period)
+
+# -- To ensure that dates are in the last calendar day for each month for later matching with other variables
+
+Gold_Monthly$Average <- (Gold_Monthly$Average_Close/lag(Gold_Monthly$Average_Close) - 1)*100
+
+Gold_Monthly$Date <- ceiling_date(Gold_Monthly$Date, "month") - days(1)
+```
+
+```{r Data frame for analysis, include = FALSE}
+# Cleaning up data-frames and choosing the variables; Excluding YOY Rates
+
+# --- Creating a new data frame for Inflation ---
+
+INF_filtered <- INF_m[c("Date", "Inflation", "CPI","MOM_Rate")]
+
+      # Changing column names
+
+colnames(INF_filtered) <- c("Date", "Inflation", "CPI","CPI_MOM")
+
+      # Sorting data by date, if not yet sorted properly
+
+INF_filtered <- INF_filtered %>% arrange(Date)
+
+# --- Creating a new data frame for OFW Remittances ---
+
+Remit_filtered <- Remit_m[c("Date", "dRemit", "Remittance")]
+
+      # Converting Date from dttm to date
+
+Remit_filtered$Date <- as.Date(Remit_filtered$Date)
+
+      # Sorting data by date, if not yet sorted properly
+
+Remit_filtered <- Remit_filtered %>% arrange(Date)
+
+# --- Creating a new data frame for PHP = 1 USD Exchange Rate ---
+
+PHPUSD_filtered <- PHPUSD_m[c("Date", "Average","dyAve","dmAve")]
+
+      # Changing column names
+
+colnames(PHPUSD_filtered) <- c("Date","PHPUSD_Ave","PHPUSD_dyAve","PHPUSD_dmAve")
+
+      # Converting Date from dttm to date
+
+PHPUSD_filtered$Date <- as.Date(PHPUSD_filtered$Date)
+
+      # Sorting data by date, if not yet sorted properly
+
+PHPUSD_filtered <- PHPUSD_filtered %>% arrange(Date)
+
+# --- Creating a new data frame for PSE Index ---
+
+PSE_filtered <- PSE_Monthly[c("Date","Average","Volume","Value","MOM_Rate")]
+
+    # Changing column names
+
+colnames(PSE_filtered) <- c("Date","PSE","PSE_Vol","PSE_Val","PSE_MOM")
+
+    # Sorting data by date
+
+PSE_filtered <- PSE_filtered %>% arrange(Date)
+
+# --- Target RRP: No need to create new data frame; change colnames and date format ---
+
+colnames(TRRP_Monthly) <- c("Date","TRRP")
+
+TRRP_Monthly$Date <- as.Date(TRRP_Monthly$Date)
+
+    # Sorting data by date
+
+TRRP_Monthly <- TRRP_Monthly %>% arrange(Date)
+
+# --- Create a new data frame for BRENT ---
+
+BRENT_filtered <- BRENT_Monthly[c("Date","Average","MOM_Rate")]
+
+colnames(BRENT_filtered) <- c("Date","BRENT_Ave","BRENT_MOM")
+
+    # Sorting data by date
+
+BRENT_filtered <- BRENT_filtered %>% arrange(Date)
+
+# --- No need to create new data frames for BES and CES but date need to be transformed ---
+
+BES$Date <- as.Date(BES$Date)
+
+CES$Date <- as.Date(CES$Date)
+
+    # Sorting data by date, if not yet sorted properly
+
+CES <- CES %>% arrange(Date)
+
+BES <- BES %>% arrange(Date)
+
+# --- Creating a new dataframe for SP500 ---
+
+SP500_filtered <- SP500_Monthly[c("Date","AveClose","AveReturn")]
+
+    # Changing column names
+
+colnames(SP500_filtered) <- c("Date","SP500_Ave","SP500_MOM")
+
+   # Sorting data by date, if not yet sorted properly
+
+SP500_filtered <- SP500_filtered %>% arrange(Date)
+
+# --- Creating a new data frame for Gold ---
+
+Gold_filtered <- Gold_Monthly[c("Date","Average","Average_Close")]
+
+   # Changing column names
+
+colnames(Gold_filtered) <- c("Date","Gold_MOM","Gold_Ave")
+
+   # Sorting data by date
+
+Gold_filtered <- Gold_filtered %>% arrange(Date)
+
+# --- No need to manipulate further EER ---
+
+# --- No need to add a new data frame for VIX but column names need to be changed ---
+
+colnames(VIX_Monthly) <- c("Date","VIX_Ave","VIX_End", "VIX_MOM", "VIX_YOY", "VIX_ma12")
+```
+
+```{r Merged Data, include = FALSE}
+# Merging data frames, excluding BES and CES (Quarterly time series)
+
+# --- Listing all the data frames ---
+
+DATA_list <- list(
+  PSE_filtered,
+  INF_filtered,
+  Remit_filtered,
+  PHPUSD_filtered,
+  TRRP_Monthly,
+  BRENT_filtered,
+  SP500_filtered,
+  Gold_filtered,
+  DIR,
+  EER,
+  VIX_Monthly)
+
+# --- Use reduce to merge the data by "Date" ---
+
+DATA_merged <- reduce(DATA_list, inner_join, by = "Date")
+
+DATA_merged <- DATA_merged %>% arrange(Date)
+
+# --- Using head(), Min. date: 2005-02-28---
+
+# --- Using tail(), Max. date: 2024-04-30 ---
+
+# Add a new column for risk premium
+
+DATA_merged$RP <- DATA_merged$PSE_MOM - DATA_merged$Tbill_All
+```
+
+```{r Time Series Data, include = FALSE}
+# Converting existing data frame into a time series object
+
+# -- Defining columns to be extracted
+
+col_list <- colnames(DATA_merged)[-1]
+
+# -- Select columns from the 'DATA_merged' data frame
+
+DATA_selectcol <- DATA_merged %>% select(all_of(col_list))
+
+# -- Converting selected columns to a matrix
+
+DATA_asmatrix <- as.matrix(DATA_selectcol)
+  
+# --- Converting 'DATA_asmatrix' into a ts object
+
+DATA_ts <- ts(DATA_asmatrix, start = c(2005,01), frequency = 12)
+```
+
+```{r Quarterly Data, include = FALSE}
+Quarterly_DATA_list <- list(PSE_filtered,GDP_raw, INF_m)
+
+DATAQ_merged <- reduce(Quarterly_DATA_list, inner_join, by = "Date")
+
+DATAQ_merged <- DATAQ_merged %>% arrange(Date)
+
+DATA_Qtrly <- na.omit(DATAQ_merged)
+
+# --- Using head(), date from 2005-03-31---
+
+# --- Using tail(), date to 2024-03-31 ---
+
+# --- Create another one with BSP CES and BES
+
+
+Quarterly_DATABSP_list <- list(PSE_filtered,BES,CES,GDP_raw, INF_m)
+
+DATAQBSP_merged <- reduce(Quarterly_DATABSP_list, inner_join, by = "Date")
+
+DATAQBSP_merged <- DATAQBSP_merged %>% arrange(Date)
+
+BSP_Qtrly <- na.omit(DATAQBSP_merged)
+
+# --- Using head(), date from 2019-09-30---
+
+# --- Using tail(), date to 2024-03-31 ---
+```
+
+# 1. Introduction
+
+> A market in which prices always "fully reflect" available information is called "efficient."
+>
+> `r tufte::quote_footer('Eugene F. Fama (1970)')`
+
+Television channels and shows are produced to weigh on the prices of financial assets every hour of each day. Predictions would be made --- on the movement of the stock prices, the stock index, and on whether or not the market is going into the bear or bull market, etc. --- and advice would be given on what securities to invest based on their expected performance.
+
+A good number of people seemed to be determined to follow what the market[^1] is doing and where it is going. In the Philippines, the investing public is still minuscule.[^2] But with the financial technology enabling "democratization of finance", in particular the so-called "GCash effect", allows users to trade stocks using their e-wallet resulting to an increase in holders of stock broker accounts [@rivas2024].
+
+[^1]: When market is mentioned in this paper, it refers to the financial capital market, specifically, the stock market, otherwise specified.
+
+[^2]: The 2021 Financial Inclusion Survey (FIS) conducted by the Bangko Sentral ng Pilipinas indicates that only 36% of the adult population has investments including pension (10% if pension is excluded), of which, only 1% invested in stocks, mutual funds and unit trust investment funds (UITF). The 2018 Consumer Finance Survey also yield similar dismal participation of Filipino households in the stock market with 0.3% households indicate they have MF and/or UITF, 0.1 % with listed stocks holdings, and 0.1% indicated they have fixed income holdings. [@bangkosentralngpilipinas2018] [@bangkosentralngpilipinas2021]
+
+```{r echo=FALSE}
+# Types of investments owned (base: among investors)
+
+INVESTtype.df <- c("Pension",
+                   "Pag-IBIG",
+                   "Time Deposit",
+                   "Stocks, UITF, and MF",
+                   "PERA")
+
+INVEST2019a.df <- as.numeric(c(.90, .52, .02, .04, .001))
+
+INVEST2021a.df <- as.numeric(c(.96, .23, .02, .01, .01))
+
+
+# Percentage of adults with investment
+
+INVESTpop.df <- c("Including pension",
+                  "Excluding pension")
+
+
+INVEST2019b.df <- as.numeric(c(.25, .15))
+
+INVEST2021b.df <- as.numeric(c(.36, .10))
+
+
+# Dataframe for types of investments
+
+INVESTMENTa.df <- data.frame(
+                   Type = INVESTtype.df,
+                   Year_2019 = INVEST2019a.df,
+                   Year_2021 = INVEST2021a.df)
+
+# Dataframe for investor population as %
+
+INVESTMENTb.df <- data.frame(
+                   Type = INVESTpop.df,
+                   Year_2019 = INVEST2019b.df,
+                   Year_2021 = INVEST2021b.df)
+
+# Graph for types of investment
+
+INVESTa <- ggplot(data = INVESTMENTa.df, aes(y = Type)) +
+  
+  geom_segment(aes(x = Year_2019, xend = Year_2021), linewidth = 0.8, color = "grey") + 
+  
+  geom_point(aes(x = Year_2019, color = "2019"), size = 3) +
+  
+  geom_point(aes(x = Year_2021, color = "2021"), size = 3) +
+  
+  scale_color_manual(values = c("2019" = "grey", "2021" = "blue")) +
+  
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  
+  labs(x = NULL, y = NULL, title = 'Types of investments (base: among investors)', color = "Year") +
+  
+  theme(legend.position = "bottom",
+        legend.box = "horizontal") +
+  
+  theme_grey() 
+
+# Graph for investing population
+
+INVESTb <- ggplot(data = INVESTMENTb.df, aes(y = Type)) +
+  
+  geom_segment(aes(x = Year_2019, xend = Year_2021), linewidth = 0.8, color = "grey") +
+  
+  geom_point(aes(x = Year_2019, color = "2019"), size = 3) +
+  
+  geom_point(aes(x = Year_2021, color = "2021"), size = 3) +
+  
+  scale_color_manual(values = c("2019" = "grey", "2021" = "blue")) +
+  
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  
+  labs(x = NULL, y = NULL, title = 'Percentage of adults with investments', color = "Year") +
+  
+  theme(legend.position = "bottom") +
+  
+  theme_grey() 
+```
+
+```{r echo = FALSE}
+grid.arrange(INVESTb,INVESTa, ncol=1)
+```
+
+Determining the future prices, or at least their direction, is relevant to the investing public as it is going to determine whether they are going to gain or lose from their investments. By extension, it is important to determine which factor(s) affect the stock price which can be helpful in their investing strategies. Macroeconomic variables seem to be a good candidate as listed companies are part of the macroeconomy and their profitability is affected by the economic conditions. The beta coefficients or the sensitivity of macroeconomic variables to stock prices is one of key elements is in the Arbitrage Pricing Model which was proposed by Stephen Ross in 1976.[^3]
+
+[^3]: In Arbitrage Pricing Model (APM), the expected market returns of an asset is equal to the sum of risk-free rate of the return and the various factors which influenced the market returns (such as macroeconomic variables) multiplied by the sensitivity of the asset returns or its beta ($\beta$).
+
+# 2. Statement of the Problem
+
+This paper aims to investigate whether macroeconomic variables determine the market returns of the Philippine Stock Exchange Index (PSEI) and estimate the degree and direction of their relationships using linear regression. A range of variables are included in the study such as national accounts, price indices, exchange rates, as well as indices of other real and financial assets (US equities, gold, and oil). The period of the study covers from the 2005 to 2024 using time series data from the Bangko Sentral ng Pilipinas (BSP), the Philippine Statistics Authority (PSA) and the data repositories of the World Bank (WB), Yahoo Finance, and Federal Reserve Economic Data (FRED) by the Federal Reserve Bank of St. Louis.
+
+In particular, what this paper is trying to answer are the following:
+
+-   Which macroeconomic variables can be able to determine the market returns of the Philippine Stock Exchange (PSE) Index? Which ones do not?
+
+-   Which of the variables have a positive relationship to PSEI market returns? Which ones have a negative relationship?
+
+-   What is the degree of the relationship of the variables with significant explanatory power?
+
+The study is restricted to the returns of the PSEI and does not make inference on the market returns of sub-indices or the returns of the specific listed company in the Philippine Stock Exchange. The model used in this paper is not dynamic in a sense that the order of events of the independent variables is not considered. Such could be significant and may be captured by a more robust analysis using non-linear regression model(S).
+
+# 3. Model Definition
+
+## 3.1. Theoretical background
+
+Fama's seminal work in 1970 on the Efficient Market Hypothesis (EMH) is the foundation of many studies investigating stock markets (including those related on the relationship to macroeconomic variables).[^4] @fama1970 declared that an efficient market is the one which prices always "fully reflect" available information. He introduced three forms of market efficiency which priced-in information at various levels:
+
+[^4]: Eugene Fama won the Nobel Prize in Economics in 2013 for his Efficient Market Hypothesis and the empirical studies he made on asset prices (together with two economists who also studies asset pricing -- Robert Shiller and Lars Peter Hansen).
+
+-   *Weak form* - Historical prices are captured in the current price. Market returns, therefore, follows a "random walk".
+
+-   *Semi-strong* - Prices efficiently adjust publicly available information (e.g., annual reports, disclosures, and release of economic data).
+
+-   *Strong form* - Prices include private information such as those held by insiders.
+
+In his empirical study which follows, @fama1981 identifies 1) capital expenditures, 2) average real rate of return on capital, and 3) output having a positive relationship with real stock returns. On the other hand, 4) inflation and 5) real activity in the context of money (i.e., exchange rate and interest rate) are negatively related to returns.
+
+A study by @murcia2014 found inverse significant relationship between the PSEI and the PHPUSD exchange rate, gold reserve and the Consumer Price Index. The rest of the macroeconomic variables he tested -- Wholesale Price Index, Foreign Direct Investment, and Remittance -- do not have significant relationships to the index.
+
+In another study by @endres2020 on the relationship of some macroeconomic variable to the PSEI covering January 2009 to December 2019. He found that in the short run, 1) a weakening Philippine Peso relative to the dollar and the 2) interest rate having a positive relationship to the index. In the long run, he found the 3) exchange rate have an inverse relationship to the index. He also found that both 4) inflation and interest rate having no significant relationship in the long run.
+
+In a recent paper by @sajor2023, it was found that $\Delta \log$ of Foreign Direct Investment (in Current USD) (including its lagged form -- $\Delta \log FDI_{t-1}$) and the real effective exchange rate ($\log RER$) have a positive relationship with the PSE Index in the short run while lagged interest rate ($\Delta INT_{t-3}$) has an inverse relationship with the index. In the long run, RER and INT maintains the direction of their relationship to the index. However, the relationship between the $\log FDI$ and PSEI becomes inverted.
+
++-----------------+----------------------------------------+------------------------------------------------------------------+
+| Study           | Dependent Variable                     | Significant Independent Variables (Direction)                    |
++=================+========================================+==================================================================+
+| @fama1981       | US stock market real returns           | \* Capital expenditures (+);\                                    |
+|                 |                                        | \* Average real rate of return on capital (+);\                  |
+|                 |                                        | \* Output (+);\                                                  |
+|                 |                                        | \* Inflation (-);\                                               |
+|                 |                                        | \* Real activity related to money (-)                            |
++-----------------+----------------------------------------+------------------------------------------------------------------+
+| @murcia2014     | Philippine Stock Exchange Index (PSEI) | \* Philippine Peso - US Dollar exchange rate (PHP = 1 USD) (-);\ |
+|                 |                                        | \* Gold reserves (-);\                                           |
+|                 |                                        | \* Consumer Price Index (CPI) (-)                                |
++-----------------+----------------------------------------+------------------------------------------------------------------+
+| @endres2020[^5] | PSEI                                   | *In the short run:\                                              |
+|                 |                                        | \** PHP = 1 USD (-);\                                            |
+|                 |                                        | \* Interest rate ($i$) (+)                                       |
+|                 |                                        |                                                                  |
+|                 |                                        | In the long run:\                                                |
+|                 |                                        | \* PHP = 1 USD (+)                                               |
++-----------------+----------------------------------------+------------------------------------------------------------------+
+| @sajor2023      | PSEI                                   | In the short run:\                                               |
+|                 |                                        | \* $\Delta \log FDI$) (+)\                                       |
+|                 |                                        | \* $\Delta \log FDI_{t-1}$ (+)\                                  |
+|                 |                                        | \* $\log$ of real exchange rate (+)\                             |
+|                 |                                        | \* $\Delta i_{t-3}$ (-)                                          |
+|                 |                                        |                                                                  |
+|                 |                                        | In the long run:\                                                |
+|                 |                                        | \* $RER$ (+)\                                                    |
+|                 |                                        | \* $i$ (-)\                                                      |
+|                 |                                        | \* $\log FDI$ (-)                                                |
++-----------------+----------------------------------------+------------------------------------------------------------------+
+
+: Summary of previous studies
+
+[^5]: @erickjohne.endres2020 employed Autoregressive Distributed Lag (ARDL) model to test for the short run while F-Bounds and Wald Tests were used for the long run.
+
+## 3.2. Mathematical model
+
+In this study, a multiple linear regression analysis is employed to measure how the returns of the Philippine Stock Exchange Index respond to the movement of the macroeconomic variables as well as on some financial market indicators. This is mathematically represented by
+
+$$
+PSEI_r = f(Macro, Fin)
+$$
+
+where $Macro$ represents the macroeconomic variables while $Fin$ refers to all other financial assets indicators.
+
+In the Arbitrage Pricing Model, the expected returns of the stock market is equal to the risk free rate and the sum of all effects of all relevant factors. Subtracting the risk free rate from both side will give the risk premium equating to the effects of relevant variables.
+
+$$
+    E(R)_i = R_f + \sum_{n=1}^n \beta_n \times F_n + \epsilon
+$$ $$
+E(R)_i - R_f = \text{Risk Premium} = \sum_{n=1}^n \beta_n \times F_n + \epsilon
+$$
+
+If the Arbitrage Pricing Model is to be employed, the mathematical model can be adjusted to include the risk free rate in the equation similar to the earlier equation.
+
+$$
+PSEI_r = R_F + \sum_{n=1}^n \beta_n F_n + \epsilon
+$$
+
+What we can infer from this is that the $R_F$ is, at least, a component of the regression model's y-intercept.
+
+The variables tested in this study are:
+
+| Symbol | Definition, Available Data Range, Source |
+|----|----|
+| NGDP | **Nominal GDP** - Quarterly GDP in current million PHP (1981-2024); [@philippinestatisticsauthority2024] |
+| RGDP | **Real GDP** - Quarterly GDP in million PHP at constant 2018 prices (1981-2024); [@philippinestatisticsauthority2024] |
+| dNGDP | **Nominal GDP growth rate** - Quarterly year-on-year nominal GDP growth rates in % (1982-2024); [@philippinestatisticsauthority2024] |
+| dRGDP | **Real GDP growth rate** - Quarterly year-on-year real GDP growth rates in % (1982-2024); [@philippinestatisticsauthority2024] |
+| CPI | **Consumer Price Index** (2018 = 100) (1958-2024); [@bangkosentralngpilipinas2024] |
+| Inflation | **Inflation rate** - Average monthly year-on-year inflation rates (2018 = 100) in % (1958-2024; [@bangkosentralngpilipinas2024] |
+| Remittance | **OFW Remittances** - Monthly time series of OFW Remittances in thousands USD (1989-2024); [@bangkosentralngpilipinas2024a] |
+| PHPUSD_Ave | **PHP = 1 USD Exchange Rate** - Monhtly average exchange rate in PHP = 1 USD (1945 - 2024);[@bangkosentralngpilipinas2024a] |
+| PSE | **PSE Index** - Average monthly PSE Index (1995 - 2005)[^6]; \| [@bangkosentralngpilipinas2024b] \| |
+| PSE_Val | Total value of shares traded in a month (in million PHP) (2005 - 2024); [@bangkosentralngpilipinas2024b] |
+| PSE_Vol | Number of shares traded in a month (in millions) (2005 - 2024); [@bangkosentralngpilipinas2024b] |
+| TRRP | **Target RRP** - Monthly average of Bangko Sentral ng Pilipinas Target Reverse Repurchase (RRP) Rate in % (1993 - 2024) ; [@bangkosentralngpilipinas2024c] |
+| IBCL | **Interbank Call Loan Rate** - Monthly Average rate charged between banks for short-term loans (usually overnight) (1993 - 2024); [@bangkosentralngpilipinas2024c] |
+| EER | **Effective Exchange Rate** - Weighted index comparing the Philippine Peso to a basket of currency (1980 = 100) (1993 - 2024); [@bangkosentralngpilipinas2024c] |
+| BRENT | **BRENT Crude Oil Price** - Daily spot prices of BRENT as traded in Europe (1987 - 2024); [@fredfederalreservebankofst.louis2024] |
+| SP500 | **S&P 500 Index** - Daily time series of the S&P 500 –an index by Standard & Poor of 500 largest companies listed in the stock exchanges in the US (1957 - 2024); [@yahoofinance2024] |
+| GOLD | **COMEX Gold Futures** - Price of Gold Futures as traded in COMEX (2000 - 2024); [@yahoofinance2024a] |
+| CES | **Consumer Expectations Survey** - Economic outlook of the consumers in the current quarter, next quarter and in the next 12 months (2007 - 2024); Expressed as % positive less % negative sentiment; [@bangkosentralngpilipinas2024d] |
+| BES | **Business Expectations Survey** - Economic outlook of the businesses in the current quarter, next quarter and in the next 12 months (2001 - 2004); Expressed as % positive less % negative sentiment; [@bangkosentralngpilipinas2024e] |
+
+: Base Series
+
+[^6]: The Philippine Stock Exchange changed its methodology to the main index in 1995.
+
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Symbol       | Definition, Available Data Range, Source                                                                                                                                                                   |
++==============+============================================================================================================================================================================================================+
+| CPI_MOM      | Month-on-month rate of change in CPI - Alternative measure of price changes on month-on-month instead of year-on-year\                                                                                     |
+|              | \                                                                                                                                                                                                          |
+|              | $CPI_{MOM_t} = ( \frac{CPI_t}{CPI_{t-1}} - 1) \times 100);$ \|                                                                                                                                             |
+|              |                                                                                                                                                                                                            |
+|              | where $CPI_t$ is the current month CPI and $CPI_{t-1}$ is the previous month CPI.                                                                                                                          |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| PHPUSD_dyAve | Year-on-year rate of change between monthly average PHP = 1 USD exchange rate                                                                                                                              |
+|              |                                                                                                                                                                                                            |
+|              | $dy_t = (\frac{PHPUSD_t}{PHPUSD_{t-12}} - 1) \times 100);$                                                                                                                                                 |
+|              |                                                                                                                                                                                                            |
+|              | where $dy_t$ is the year-on-year rate of change, $PHPUSD_t$ is the average exchange rate for the current period and $PHPUSD_{t-12}$ is the average exchange rate for the same period in the previous year. |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| PHPUSD_dmAve | Month-on-month rate of change between monthly average PHP = 1 USD exchange rate                                                                                                                            |
+|              |                                                                                                                                                                                                            |
+|              | $dm_t = (\frac{PHPUSD_t}{PHPUSD_{t-1}} - 1) \times 100);$                                                                                                                                                  |
+|              |                                                                                                                                                                                                            |
+|              | where $dm_t$ is the year-on-year rate of change, $PHPUSD_t$ is the average exchange rate for the current month and $PHPUSD_{t-1}$ is the average exchange rate for the previous month.                     |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| PSE_MOM      | **PSEI Monthly Returns** - Month-on-month rate of change between monthly average of the PSEI                                                                                                               |
+|              |                                                                                                                                                                                                            |
+|              | $MOM_t = (\frac{PSE_t}{PSE_{t-1}} - 1) \times 100);$                                                                                                                                                       |
+|              |                                                                                                                                                                                                            |
+|              | where $dm_t$ is the year-on-year rate of change, $PSE_t$ is the average PSEI for the current month and $PSE_{t-1}$ is the average PSEI for the previous month.                                             |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| SP500_Ave    | Monthly average of S&P 500                                                                                                                                                                                 |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| SP500_MOM    | S&P 500 Monthly Returns - Month-on-month rate of change between monthly average of S&P 500                                                                                                                 |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Gold_Ave     | Monthly average of Gold prices                                                                                                                                                                             |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Gold_MOM     | Gold Monthly Returns - Month-on-month rate of change between monthly average of Gold prices                                                                                                                |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| VIX_Ave      | Monthly average of the VIX                                                                                                                                                                                 |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| VIX_MOM      | Month-on-month rate of change between monthly average of the VIX                                                                                                                                           |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| VIX_YOY      | Year-on-year rate of change between monthly average of the VIX                                                                                                                                             |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| VIX_ma12     | 12-month moving average of the VIX                                                                                                                                                                         |
++--------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+: Derived Series
+
+## 3.3. Dependent and Independent Variables
+
+### PSEI
+
+The main index of the Philippine Stock Exchange (PSEI) grows steadily from 2005 reaching its highest close January of 2018 before falling back to 8,000 level followed by the decline which coincides with the pandemic. The main index suffered its largest monthly drops during the 2007-2008 financial crisis and the recent recession.
+
+In this study, the monthly returns of the PSEI is the dependent variable mainly used but the main index is also tested in the linear regression analysis.
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# PSE Main Index, Monthly averages and end-of-period
+
+PSEI_m.line <- ggplot() +
+
+  geom_line(data = PSE_Monthly, aes(x = Date, y = Average), color = "blue", linetype = "solid") +
+  
+  geom_rect(data = Recession_quarters_2005, aes(xmin = as.Date("2020-03-31"), xmax = as.Date("2021-03-31"), ymin = -Inf, ymax = Inf), 
+            fill = "grey", alpha = 0.1) +
+  
+  
+  # Themes
+  labs(x = 'Date', y ='PSEI') +
+  theme_grey()
+
+PSEI_m.line
+```
+
+```{r echo = FALSE}
+# Determining the scale factor for axes manipulation
+
+sf_PSE <- max(DATA_merged$PSE, na.rm = TRUE) / max(DATA_merged$PSE_Vol, na.rm = TRUE)
+
+# PSE Value traded
+
+PSEI_m.bar <- ggplot(data = DATA_merged) +
+
+  geom_col(aes(x = Date, y = PSE_Vol)) +
+  
+  # Secondary axis : PSE Index
+  
+  scale_y_continuous(
+    name = "Volume of Shares Traded, in Billions",
+    sec.axis = sec_axis(~ . * sf_PSE, name = "PSE Index")) +
+  
+  geom_line(aes(x = Date, y = PSE / sf_PSE), color = "grey", linetype = "dashed") +
+  
+  # Themes
+  labs(x = 'Date', title = 'Volume of shares traded in PSE') +
+  
+  theme_grey()
+
+PSEI_m.bar
+```
+
+```{r echo = FALSE, warning=FALSE}
+# Compute for moving average of MOM_Rate
+
+PSE_Monthly$MOM_Rate.ma <- rollmean(PSE_Monthly$MOM_Rate, k = 12, fill = NA)
+
+# Month-on-month PSE Index returns
+
+PSEI_mRate.line <- ggplot() +
+  
+  geom_line(data = PSE_Monthly, aes(x = Date, y = MOM_Rate), color = "grey", linetype = "solid") +
+  
+    geom_line(data = PSE_Monthly, aes(x = Date, y = MOM_Rate.ma), color = "blue", linetype = "solid") +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_hline(yintercept = mean(na.omit(PSE_Monthly$MOM_Rate)), linetype = "dashed", color = "red") +  
+  # Themes
+  labs(x = 'Date', y ='Returns, %', title = "Monthly returns of PSEI, % with MA(12)") +
+  theme_grey()
+
+PSEI_mRate.line
+```
+
+```{r echo = FALSE, warning=FALSE}
+# Month-on-Month Returns Histogram
+
+PSEI_mRate.histo <- ggplot(data = DATA_merged, aes(x = PSE_MOM)) +
+  
+  geom_histogram(binwidth = 1) +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_vline(aes(xintercept = mean(na.omit(PSE_MOM))), linetype = "dashed", color = "blue", linewidth = 0.8) + 
+  
+  # Labels / text annotations
+  
+  geom_text(aes(x = -1, y = 28, label = "μ(SP500) = 0.70%", hjust = 1.2), size = 3.5, color = "red") +
+  
+  geom_text(aes(x = 10, y = 28, label = "μ(PSEI) = 0.66%"), size = 3.5, color = "blue") +
+  
+  # Themes
+  labs(x = 'Returns, %', y ='Count', title = 'Histogram of the Monthly Returns of PSEI') +
+  theme_grey()
+
+PSEI_mRate.histo
+```
+
+```{r Annualized PSEI returns, echo=FALSE, warning=FALSE}
+# Year-on-year PSE Index returns
+
+PSEI_yRate.line <- ggplot(PSE_Monthly) +
+  
+  geom_line(aes(x = Date, y = YOY_Rate), color = "Blue", linetype = "solid") +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_hline(yintercept = mean(na.omit(PSE_Monthly$YOY_Rate)), linetype = "dashed", color = "red") +  
+  # Themes
+  labs(x = 'Date', y ='Returns, %') +
+  theme_grey()
+
+# Year-on-Year Returns Histogram
+
+PSEI_yRate.histo <- ggplot(data = PSE_Monthly, aes(x = YOY_Rate)) +
+  
+  geom_histogram(binwidth = 5) +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_vline(aes(xintercept = mean(na.omit(YOY_Rate))), linetype = "dashed", color = "blue", linewidth = 0.8) +  
+  # Themes
+  labs(x = 'Returns, %', y ='Count') +
+  theme_grey()
+```
+
+### Gross Domestic Product
+
+It seems to be intuitive that as a common measure of the aggregate economy, the Gross Domestic Product and its movement do affect the stock prices. If, for example, the growing economy is associated with growing dispensable income, a portion of the increased incomes may end up into the capital markets. On the other hand, a growing economy could also mean a growing spending which can be positive to the profitability of firms which potentially leads to increasing stock prices.
+
+But such relationship, if there is any, seems not so obvious as we can see in the scatter plots between GDP growth with the PSEI and its returns. If the outliers from the data is removed, the regression line which is almost a vertical one. A consequence of that is the y-axis (PSE Index or its returns) takes whatever values for a fixed-value of x (growth in real GDP).
+
+```{r warning=FALSE, include=FALSE}
+# Trend line for the quarterly year-on-year growth rate of Real GDP
+
+dGDP.line <- ggplot() +
+  
+  geom_line(data = GDP_raw, aes(x = Date, y = dRGDP), color = "blue") +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_hline(yintercept = mean(na.omit(GDP_raw$dRGDP)), linetype = "dashed", color = "red") +
+  
+  geom_rect(data = recession_periods, aes(xmin = Start, xmax = End, ymin = -Inf, ymax = Inf), fill = "grey", alpha = 0.3) +
+  
+  
+  # Adding black lines from the origin
+  
+  geom_hline(yintercept = 0, color = "black") +
+  
+  labs(y = 'Year-on-year growth, %', x = 'Date', title = 'GDP growth, 1981-2024') +
+  
+  theme_grey()
+```
+
+```{r warning=FALSE, echo=FALSE}
+dGDP.histo <- ggplot(GDP_raw) +
+  
+  geom_histogram(aes(x = dRGDP), binwidth = 1) +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_vline(xintercept = mean(na.omit(GDP_raw$dRGDP)), linetype = "dashed", color = "red") +
+  
+  labs(y = 'Frequency', x = 'GDP growth, %', title = 'Histogram of GDP growth from 1981-2024')
+  
+  theme_grey()
+```
+
+```{r echo=FALSE, warning=FALSE}
+dGDP.line
+```
+
+```{r warning=FALSE, echo=FALSE}
+dGDP.histo
+```
+
+```{r warning = FALSE, echo = FALSE}
+# Scatter plot between the returns of the PSEI to the year-on-year growth of the GDP
+
+PSEr_dGDP.plot <- ggplot(data = DATA_Qtrly, aes(x = dRGDP, y = PSE_MOM)) +
+  
+  # Scatter plots
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  stat_regline_equation(label.y = -15, label.x = -15, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'GDP Growth Rates, %', title = 'PSEI returns and GDP growth') +
+  
+  geom_text(data = subset(DATA_Qtrly, dRGDP < 0), aes(label = as.Date(Date)), vjust = -1, hjust = -0.1, size = 3, color = "grey") +
+  
+  geom_point(data = subset(DATA_Qtrly, dRGDP < 0), aes(label = as.Date(Date)), size = 1.5, color = "red") +
+  
+  theme_grey()
+```
+
+```{r warning = FALSE, echo = FALSE}
+# Scatter plot between the PSEI and GDP Growth
+
+PSE_dGDP.plot <-  ggplot(data = DATA_Qtrly, aes(x = dRGDP, y = PSE)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  stat_regline_equation(label.y = 9000, label.x = -10, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  geom_smooth(data = subset(DATA_Qtrly, dRGDP > 0), method = "lm", se = FALSE, color = "grey") +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'GDP Growth Rates, %', title = 'PSEI and GDP growth') +
+  
+  geom_text(data = subset(DATA_Qtrly, dRGDP < 0), aes(label = as.Date(Date)), vjust = -1, hjust = -0.1, size = 3, color = "grey") +
+  
+  geom_point(data = subset(DATA_Qtrly, dRGDP < 0), aes(label = as.Date(Date)), size = 1.5, color = "red") +
+  
+  theme_grey()
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+grid.arrange(PSEr_dGDP.plot, PSE_dGDP.plot, nrow = 1)
+```
+
+### CPI and Inflation
+
+The movement of input prices may lead firms to adjust their prices which may affect the quantity demanded of their products and services therefore also affecting profits and ultimately to cause movement in their stock prices. Another route of analysis is that inflation affects the disposable income of consumers which could both affect their consumption (which affects the firms profits) and financial investment activities (affecting stock prices).
+
+```{r warning=FALSE, echo = FALSE}
+
+# Year-on-year inflation rates, monthly, %, 2018 = 100
+
+INF_m.line <- ggplot() +
+
+  geom_line(data = INF_m, aes(x = Date, y = Inflation), color = "blue") +
+  
+  geom_line(data = INF_m, aes(x = Date, y = MOM_Rate), color = "grey") +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_hline(yintercept = mean(na.omit(INF_m$Inflation)), linetype = "dashed", color = "red") +
+  
+  geom_rect(data = recession_periods, aes(xmin = Start, xmax = End, ymin = -Inf, ymax = Inf), fill = "grey", alpha = 0.3) +
+  
+  # Adding black lines from the origin
+  
+  geom_hline(yintercept = 0, color = "black") +
+  
+  ylab("Year-on-year inflation rate, %") +
+  
+  theme_grey()
+```
+
+```{r warning=FALSE, echo = FALSE, messages = FALSE}
+# Histogram for inflation rate
+
+INF_m.histo <- ggplot(INF_m) +
+  
+  xlab("Inflation rate, %") +
+  ylab("Frequency") +
+  
+  geom_histogram(data = subset(INF_m, Date < as.Date("2000-01-01")), aes(x = Inflation, fill = "Before 2000"), binwidth = 1) +
+  
+  geom_histogram(data = subset(INF_m, Date > as.Date("2000-01-01")), aes(x = Inflation, fill = "After 2000"), binwidth = 1) +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_vline(xintercept = mean(na.omit(INF_m$Inflation)), linetype = "dashed", color = "red") +
+  
+  # Adding labels
+  
+  labs(x = 'Inflation rate, %', y = 'Frequency', fill = "Legend") +
+  
+  theme_grey() +
+  
+  theme(legend.position = c(0.75,0.85))
+```
+
+```{r warning = FALSE, message = FALSE, echo = FALSE}
+grid.arrange(INF_m.line,INF_m.histo, nrow = 1, top = "Year-on-Year Inflation Rates, % and Histogram" )
+```
+
+Initial assessment by looking at the scatterplots between the PSEI returns, the CPI and inflations rates seem to show little relations between these variables. But with the main index, especially with the CPI, shows a relatively stronger relationship. However, that is just because the index is in nominal terms and include the effects of prices. Naturally, these two variables should follow similar pattern.[^7]
+
+[^7]: Durbin-Watson test for the linear regression with PSE \~ CPI yields a DW = 0.06 suggesting an evidence of positive autocorrelation. Also, in the Fisher Equation $(1 + i) = (1 + r ) \times (1 + \pi)$, which is for very small numbers approximated to $i = r + \pi$ describing the relationship between nominal and real interest rates and inflation.
+
+```{r message=FALSE, warning=FALSE, echo = FALSE}
+# Between PSEI returns and Inflation rate
+
+PSEr_INF.plot <- ggplot(DATA_merged, aes(x = Inflation, y = PSE_MOM)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Monthly Returns, %', x = 'Inflation Rate, %') +
+  
+  stat_regline_equation(label.y = -20, label.x = 3, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+# Between PSEI returns and the CPI
+
+PSEr_CPI.plot <- ggplot(DATA_merged, aes(x = CPI, y = PSE_MOM)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns', x = 'CPI, 2018=100') +
+  
+  stat_regline_equation(label.y = -20, label.x = 75, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+# Between PSEI Returns and the CPI Month-on-month rate
+
+PSEr_CPImr.plot <- ggplot(data = DATA_merged, aes(x = Inflation, y = CPI_MOM)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Monthly Returns, %', x = 'CPI Month-on-month rate, %') +
+  
+  stat_regline_equation(label.y = 1.5, label.x = 0, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r warning = FALSE, echo = FALSE}
+grid.arrange(PSEr_INF.plot, PSEr_CPI.plot, PSEr_CPImr.plot, nrow=2, top = "PSEI Returns, CPI and Inflation Rates")
+```
+
+```{r echo = FALSE}
+# Scatter plot between PSEI and Inflation
+
+PSEI_Inflation.plot <- ggplot(DATA_merged) +
+  
+  aes(x = Inflation, y = PSE) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSE', x = 'Inflation, %') +
+  
+  stat_regline_equation(label.y = 3000, label.x = 0, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+# Scatter plot between PSEI and CPI
+
+PSEI_CPI.plot <- ggplot(DATA_merged) +
+  
+  aes(x = CPI, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSE', x = 'CPI, 2018=100') +
+  
+  stat_regline_equation(label.y = 2500, label.x = 80, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+# Scatter plot between PSEI and CPI
+
+PSEI_CPIMOM.plot <- ggplot(DATA_merged) +
+  
+  aes(x = CPI_MOM, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSE', x = 'Monthly Change in CPI, %') +
+  
+  stat_regline_equation(label.y = 8000, label.x = -0.5, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r warning = FALSE, echo = FALSE}
+grid.arrange(PSEI_Inflation.plot, PSEI_CPI.plot, PSEI_CPIMOM.plot, nrow = 2, top = "PSEI, CPI and Inflation")
+```
+
+### Remittance
+
+Remittances may have an effect on the stock prices by at least two ways. First is through the increase in spending by the beneficiaries which makes companies profitable. And if not through spending, the second way is through the increase in disposable income which may find its way to the financial markets.
+
+Historical data of remittance growth shows high fluctuations in the 1990s then slowly tapering off in 2010s. Early large fluctuation may be due to the small base effect. Today, remittance growth is relatively less volatile.
+
+Like the CPI and Inflation rates, PSEI growth shows little relationship with remittance growth. When paired with the main index, the coefficient of determination is larger but the negative autocorrelation of the residuals suggests at least one violation of linear regression assumptions.
+
+```{r warning=FALSE, echo = FALSE}
+# Monthly OFW Remittances
+
+Remit_m.line <- ggplot(data = Remit_m, aes(x = Date)) +
+  
+  
+  geom_line(aes(y = dRemit), color = "Blue") +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_hline(yintercept = mean(na.omit(Remit_m$dRemit)), linetype = "dashed", color = "red") +
+  
+  # Adding black lines from the origin
+  
+  geom_hline(yintercept = 0, color = "grey") +
+  
+  # Labels and themes
+  
+  labs(x = 'Date', y = 'Remittance growth, %', title = 'Remittance growth, year-on-year, %') +
+  
+  theme_grey()
+
+# Histogram for OFW Remittances
+
+Remit.histo <- ggplot() +
+  
+  geom_histogram(data = subset(Remit_m, Date < as.Date("2000-01-01")), aes(x = dRemit, fill = "Before 2000"), binwidth = 1) +
+  
+  geom_histogram(data = subset(Remit_m, Date > as.Date("2000-01-01")), aes(x = dRemit, fill = "After 2000"), binwidth = 1) +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_vline(xintercept = mean(na.omit(Remit_m$dRemit)), linetype = "dashed", color = "red") +
+  
+  labs(
+    x = "Remittance growth rate, %",
+    y = "Frequency",
+    fill = "Legend",
+    title = "Histogram of Remittance growth"
+  ) +
+  
+  theme_grey() +
+  theme(
+    legend.position = "bottom"
+  )
+```
+
+```{r warning = FALSE, echo = FALSE}
+Remit_m.line
+```
+
+```{r warning = FALSE, echo = FALSE}
+Remit.histo
+```
+
+```{r echo = FALSE}
+# Between PSEI and SP500
+
+PSEI_Remit.plot <- ggplot(DATA_merged) +
+  aes(x = Remittance, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'Remittance, USD billions') +
+  
+  stat_regline_equation(label.y = 3000, label.x = 1.5, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEI_dRemit.plot <- ggplot(DATA_merged) +
+  
+  aes(x = dRemit, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'Remittance Growth, %') +
+  
+  stat_regline_equation(label.y = 2500, label.x = -20, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+
+# Between PSEI Monthly Returns and SP500
+
+PSEIr_Remit.plot <- ggplot(DATA_merged) +
+  
+  aes(x = Remittance, y = PSE_MOM) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSE Monthly Returns, %', x = 'Remittance, USD billions') +
+  
+  stat_regline_equation(label.y = -20, label.x = 1, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEIr_dRemit.plot <- ggplot(DATA_merged) +
+  
+  aes(x = dRemit, y = PSE_MOM) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSE Monthly Returns, %', x = 'Remittance Growth, %') +
+  
+  stat_regline_equation(label.y = -18, label.x = -10, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r include = FALSE}
+Remit.lm <- lm(PSE ~ Remittance, data = DATA_merged)
+
+r4abep.dw(Remit.lm)
+```
+
+```{r warning = FALSE, echo = FALSE}
+grid.arrange(PSEI_Remit.plot, PSEIr_Remit.plot, PSEI_dRemit.plot, PSEIr_dRemit.plot, nrow = 2, top = "PSEI (left), PSEI returns (right), OFW rEmittance (top), Remittance growth (bottom)")
+```
+
+### PHP = 1 USD and EER
+
+The Philippine Peso was for a long time pegged to the US Dollar. At present, the Bangko Sentral ng Pilipinas (BSP) adopted the freely floating exchange rate wherein the determination of the value of Peso to the Dollar (and vice versa) is through the market mechanism.[^8]
+
+[^8]: Specifically through the interbank foreign exchange market.
+
+Another measure for the foreign exchange is the Effective Exchange Rate (EER) which has a nominal and real indices. The EER is the weighted average exchange rate of the Peso to the currencies of the Philippine major trading partners.
+
+In the scatter plots, only month-on-month changes in the PHP = 1 USD exchange rate to the monthly returns of the PSEI seems a significant relationship, albeit small.
+
+```{r PHPUSD line graph, warning = FALSE, echo = FALSE}
+# Trend line for the PHP = 1 USD Exchange Rate
+
+PHPUSD.line <- ggplot(PHPUSD_m) +
+
+  geom_line(aes(x = as.Date(Date), y = Average), color = "Blue") +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_hline(yintercept = mean(na.omit(DIR$Average)), linetype = "dashed", color = "red") +
+  
+  geom_rect(data = recession_periods, aes(xmin = Start, xmax = End, ymin = -Inf, ymax = Inf), fill = "grey", alpha = 0.3) +
+  
+  # Adding black lines from the origin
+  
+  geom_hline(yintercept = 0, color = "black") +
+  
+  labs(x = "Date", y = "PHP = 1 USD", title = "PHP = 1 USD Exchange Rate") +
+  
+  theme_grey()
+
+PHPUSD.line
+```
+
+```{r EER line graph, warning = FALSE, echo = FALSE}
+# Determining the scale factor for the axes manipulation
+
+sf_EER <- max(DATA_merged$EER) / max(DATA_merged$PHPUSD_Ave)
+
+
+# Combined EER and PHP = 1 USD exchange rate line chart
+
+EER.line <- ggplot(data = DATA_merged) +
+
+  geom_line(aes(x = Date, y = EER, color = "EER"), linetype = "solid", linewidth = 0.8) +
+  
+  geom_rect(data = Recession_quarters_2005, aes(xmin = as.Date("2020-03-31"), xmax = as.Date("2021-03-31"), ymin = -Inf, ymax = Inf), fill = "grey", alpha = 0.1) +
+  
+  # Secondary axis : PHP = 1 USD Exchange Rate
+  
+  scale_y_continuous(
+    name = "EER",
+    sec.axis = sec_axis(~ . / sf_EER, name = "PHP = 1 USD")) +
+  
+  geom_line(aes(x = Date, y = PHPUSD_Ave * sf_EER, color = "PHP = 1 USD"), linetype = "solid", linewidth = 0.8) +
+  
+  # Themes
+  labs(y ='EER', title = 'Effective Exchange Rate and the PHP = 1 USD', color = "Legend") +
+  
+  theme_grey() +
+  theme(
+    legend.position = "bottom"
+  )
+```
+
+```{r echo=FALSE, warning = FALSE}
+EER.line
+```
+
+```{r PHPUSD Before and After 2012, warning = FALSE, echo = FALSE}
+EER_PHPUSD.plot <- ggplot(DATA_merged) +
+  
+  # Scatter points before and after 2012-01-01
+  geom_point(data = subset(DATA_merged, Date < as.Date("2012-01-01")), aes(x = PHPUSD_Ave, y = EER, color = "Before 2012"), shape = 1, size = 1.5) +
+  geom_point(data = subset(DATA_merged, Date >= as.Date("2012-01-01")), aes(x = PHPUSD_Ave, y = EER, color = "After 2012"), shape = 1, size = 1.5) +
+  
+  # Add a regression line
+  geom_smooth(method = "lm", se = FALSE, data = subset(DATA_merged, Date < as.Date("2012-01-01")), aes(x = PHPUSD_Ave, y = EER), linewidth = 0.7) +
+  stat_regline_equation(label.y = 70, label.x = 45, data = subset(DATA_merged, Date < as.Date("2012-01-01")), aes(x = PHPUSD_Ave, y = EER, label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  
+  geom_smooth(method = "lm", se = FALSE, data = subset(DATA_merged, Date > as.Date("2012-01-01")), aes(x = PHPUSD_Ave, y = EER), linewidth = 0.7) +
+  stat_regline_equation(label.y = 88, label.x = 52, data = subset(DATA_merged, Date > as.Date("2012-01-01")), aes(x = PHPUSD_Ave, y = EER, label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  
+    # Labels and themes
+  labs(y = 'EER', x = 'PHPUSD', color = "Legend") +
+  
+  # Add regression line equation
+  
+  
+  theme_grey() +
+  theme(legend.position = "bottom", legend.background = element_blank())
+
+EER_PHPUSD.plot
+```
+
+```{r FOREX line graph, warning=FALSE, echo = FALSE}
+# Monthly rate of change of the PHP = 1 USD rate
+
+PHPUSD_m.line <- ggplot(data = subset(PHPUSD_m, Date > as.Date("1980-01-01"))) +
+  
+  # Line plot for dmAve over Date
+  geom_line(aes(x = as.Date(Date), y = dmAve), color = "blue") +
+  
+  # Adding a black line from the origin (y = 0)
+  geom_hline(yintercept = 0, color = "black") +
+  
+  geom_rect(data = recession_periods, aes(xmin = Start, xmax = End, ymin = -Inf, ymax = Inf), fill = "grey", alpha = 0.3) +
+  
+  # Labels and themes
+  labs(
+    y = "PHP = 1 USD growth rates, %",
+    x = "Date",
+  ) +
+  
+  theme_grey()
+```
+
+```{r FOREX Histogram, warning=FALSE, echo = FALSE}
+# Histogram for PHPUSD Exchange Rate
+
+PHPUSD.histo <- ggplot() +
+  
+  geom_histogram(data = subset(PHPUSD_m, Date < as.Date("2000-01-01")), aes(x = dyAve, fill = "Before 2000"), binwidth = 1) +
+  
+  geom_histogram(data = subset(PHPUSD_m, Date > as.Date("2000-01-01")), aes(x = dyAve, fill = "After 2000"), binwidth = 1) +
+  
+  # Adding a horizontal line for the mean
+  
+  geom_vline(xintercept = mean(na.omit(PHPUSD_m$dmAve)), linetype = "dashed", color = "red") +
+  
+  labs(
+    x = "PHP = 1 USD Before Growth Rates, %",
+    y = "Frequency",
+    fill = "Legend"
+  ) +
+  
+  theme_grey() +
+  theme(
+    legend.position = c(0.7,.85)
+  )
+```
+
+```{r PHPUSD Exchange Rate, echo = FALSE, warning = FALSE}
+grid.arrange(PHPUSD_m.line, PHPUSD.histo, nrow = 1, top = "PHP = 1 USD Exchange Rate Monthly Changes")
+```
+
+```{r PSEI and FOREX scatter plot, warning = FALSE, echo = FALSE}
+# Between the PSE Index and the PHP = 1 USD monthly average exchange rate
+
+PSEI_USDAve.plot <- ggplot(data = DATA_merged, aes(x = PHPUSD_Ave, y = PSE)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'PHP = 1 USD') +
+  
+  stat_regline_equation(label.y = 4000, label.x = 47, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+# Between the PSE Index and the month-on-month change in the PHP = 1 USD exchange rate
+
+PSEI_PHPUSDdm.plot <- ggplot(DATA_merged, aes(x = PHPUSD_dmAve, y = PSE)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  stat_regline_equation(label.y = 8000, label.x = -4, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'Monthly change in PHPUSD rate, %') +
+  
+  theme_grey()
+
+# Between the PSE Index and the year-on-year change in the forex rate
+
+PSEI_PHPUSDdy.plot <- ggplot(DATA_merged, aes(x = PHPUSD_dyAve, y = PSE)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  stat_regline_equation(label.y = 8000, label.x = -15, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'Year-on-year change in PHPUSD rate, %') +
+  
+  theme_grey()
+
+# Between PSEI and Effective Exchange Rate
+
+PSEI_EER.plot <- ggplot(DATA_merged, aes(x = EER, y = PSE)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  stat_regline_equation(label.y = 7500, label.x = 65, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'EER, Index') +
+  
+  theme_grey()
+```
+
+```{r echo = FALSE}
+grid.arrange(PSEI_USDAve.plot, PSEI_PHPUSDdm.plot, PSEI_PHPUSDdy.plot, PSEI_EER.plot, nrow = 2, top = "PSEI, PHP = 1 USD and EER")
+```
+
+```{r PSEI returns and FOREX scatter plot, echo = FALSE}
+PSEIr_USDAve.plot <- ggplot(DATA_merged, aes(x = PHPUSD_Ave, y = PSE_MOM)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+ # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  stat_regline_equation(label.y = -20, label.x = 40, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI returns, %', x = 'PHP = 1 USD') +
+  
+  theme_grey()
+
+# Between monthly returns of the PSEI and the PHP = 1 USD exchange rate
+
+PSEIr_PHPUSDdm.plot <- ggplot(DATA_merged, aes(x = PHPUSD_dmAve, y = PSE_MOM)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  stat_regline_equation(label.y = -20, label.x = -3, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Monthly returns, %', x = 'Monthly rate of change in PHPUSD, %') +
+  
+  theme_grey()
+
+# Between monthly returns of the PSEI and the PHP = 1 USD exchange rate
+
+PSEIr_PHPUSDdy.plot <- ggplot(DATA_merged, aes(x = PHPUSD_dyAve, y = PSE_MOM)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  stat_regline_equation(label.y = -20, label.x = -10, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Monthly returns, %', x = 'Year-on-year rate of change in PHPUSD, %') +
+  
+  theme_grey()
+
+# Between PSEI Monthly Returns and Effective Exchange Rate Index
+
+PSEIr_EER.plot <- ggplot(DATA_merged, aes(x = EER, y = PSE_MOM)) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  stat_regline_equation(label.y = -20, label.x = 75, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSE', x = 'EER, Index') +
+  
+  theme_grey()
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+grid.arrange(PSEIr_USDAve.plot, PSEIr_PHPUSDdy.plot, PSEIr_PHPUSDdm.plot, PSEIr_EER.plot, nrow = 2, top = "PSEI Monthly Returns vis-a-vis PHP = 1 USD and EER")
+```
+
+### TRRP, IBCL, and T-Bill
+
+The movement for interest rates, especially with the central bank's target rate, is one of the most watched indicators in the finance markets. A drop in the interest rate makes credit cheap therefore drives up demand in the financial markets which raises prices of the financial assets. But looking at the scatter plot, the domestic interest rates may not be useful regressors for this paper. It does not mean that there is no relationship between domestic interest rates and stock market returns. But exploring such relationship may require a technique other than linear regression.
+
+```{r TRRP, echo = FALSE}
+PSE_TRRP.line <- ggplot(data = DATA_merged) +
+  
+  aes(x = Date) +
+  
+  geom_line(aes(y = PSE, color = "PSEI")) +
+  
+  geom_line(aes(y = TRRP * 1200, color = "TRRP"), linetype = "solid", linewidth = 0.2) +
+  
+  # Labels and themes
+  
+  labs(x = 'Date', title = 'PSE Index and BSP TRRP', Legend = 'color') +
+  
+  scale_color_manual(name = "Legend", values = c("PSEI" = "black", "TRRP" = "red")) +
+  
+  scale_y_continuous(
+    name = "PSE Index",
+    sec.axis = sec_axis(~ ./1200, name = "TRRP, %"), breaks = seq(0,10, by = 2)*1200) +
+  
+  theme_grey() +
+  
+  theme(legend.position = "bottom")
+
+PSE_TRRP.line
+```
+
+```{r Scatter plot PSEI and Domestic interest rates, echo = FALSE}
+# Between PSEI and Interest Rates
+
+PSEI_TRRP.plot <- ggplot(DATA_merged) +
+  aes(x = TRRP, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'TRRP, %') +
+  
+  stat_regline_equation(label.y = 2500, label.x = 2, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEI_Tbill.plot <- ggplot(DATA_merged) +
+  
+  aes(x = Tbill_All, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'T-Bill, %') +
+  
+  stat_regline_equation(label.y = 2500, label.x = 0.5, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEI_IBCL.plot <- ggplot(DATA_merged) +
+  
+  aes(x = IBCL, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'IBCL, %') +
+  
+  stat_regline_equation(label.y = 2500, label.x = 2, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+grid.arrange(PSEI_TRRP.plot, PSEI_Tbill.plot, PSEI_IBCL.plot, nrow = 2, top = "PSEI and Domestic Interest Rates")
+```
+
+```{r PSEI returns and Domestic Interest Rates, echo = FALSE}
+# Between PSEI Monthly Returns and Interest Rates
+
+PSEIr_TRRP.plot <- ggplot(DATA_merged) +
+  aes(x = TRRP, y = PSE_MOM) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add horizontal and vertical lines along the origin for visual reference
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSE Returns, %', x = 'TRRP, %') +
+  
+  stat_regline_equation(label.y = -20, label.x = 2, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEIr_Tbill.plot <- ggplot(DATA_merged) +
+  
+  aes(x = Tbill_All, y = PSE_MOM) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'T-Bill, %') +
+  
+  stat_regline_equation(label.y = -20, label.x = 0.5, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEIr_IBCL.plot <- ggplot(DATA_merged) +
+  
+  aes(x = IBCL, y = PSE_MOM) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'IBCL, %') +
+  
+  stat_regline_equation(label.y = -20, label.x = 2, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r warning = FALSE, echo = FALSE, message = FALSE}
+grid.arrange(PSEIr_TRRP.plot, PSEIr_Tbill.plot, PSEIr_IBCL.plot, nrow = 2)
+```
+
+### BRENT
+
+The price of oil is an inflation-driver which makes input prices more expensive which affects the firms profitability. On one hand, oil is also seen as an alternative investment which, when a price of oil rises, funds could flow from the other assets to oil making the prices of the other assets fall.
+
+In the scatter plot, it is only in the monthly growth rates of BRENT with the PSEI returns that have some meaningful relationship, albeit small.
+
+```{r BRENT Plots, include = FALSE}
+# Monthly plot
+
+BRENT.plot <- ggplot(BRENT_Monthly) +
+  aes(x = Date, y = Average) +
+  geom_line(colour = "#112446") +
+  
+  labs(y = 'BRENT, USD', x = 'Date') +
+  
+  theme_grey()
+
+# Month-on-month growth
+
+BRENT_MOM.plot <- ggplot(BRENT_Monthly) +
+  aes(x = Date, y = MOM_Rate) +
+  geom_line(colour = "#112446") +
+  
+  labs(y = '% Change', x = 'Date') +
+  
+  theme_grey()
+
+# Year-on-year growth
+
+BRENT_YOY.plot <- ggplot(BRENT_Monthly) +
+  aes(x = Date, y = YOY_Rate) +
+  geom_line(colour = "#112446") +
+  
+  labs(y = '% Change', x = 'Date') +
+  
+  theme_grey()
+```
+
+```{r Scatter plot between PSEI and BRENT, echo = FALSE}
+# Between PSEI and Oil
+
+PSEI_BRENT.plot <- ggplot(DATA_merged) +
+  aes(x = BRENT_Ave, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'BRENT') +
+  
+  stat_regline_equation(label.y = 4000, label.x = 25, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEI_BRENTr.plot <- ggplot(DATA_merged) +
+  
+  aes(x = BRENT_MOM, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'BRENT Returns, %') +
+  
+  stat_regline_equation(label.y = 4000, label.x = -37, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+
+# Between PSEI Monthly Returns and SP500
+
+PSEIr_BRENT.plot <- ggplot(DATA_merged) +
+  
+  aes(x = BRENT_Ave, y = PSE_MOM) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add horizontal and vertical lines along the origin for visual reference
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'BRENT') +
+  
+  stat_regline_equation(label.y = -15, label.x = 25, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEIr_BRENTr.plot <- ggplot(DATA_merged) +
+  
+  aes(x = BRENT_MOM, y = PSE_MOM) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'BRENT Returns, %') +
+  
+  stat_regline_equation(label.y = -18, label.x = -37, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+grid.arrange(PSEI_BRENT.plot,PSEI_BRENTr.plot, PSEIr_BRENT.plot, PSEIr_BRENTr.plot, nrow = 2, top = "PSEI and BRENT")
+```
+
+### Gold
+
+Gold is another alternative investment to equity. The increase in the price of gold will decrease the demand for equity lowering the price of the later (or the way around). But, similar to previously discussed variable, it is only in returns-to-returns scatter plot between PSEI and Gold that shows significant relationship, however small.
+
+```{r Scatter Plot Gold, echo = FALSE}
+# Between PSEI and Gold
+
+PSEI_Gold.plot <- ggplot(DATA_merged) +
+  aes(x = Gold_Ave, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'Gold') +
+  
+  stat_regline_equation(label.y = 2000, label.x = 1000, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEI_Goldr.plot <- ggplot(DATA_merged) +
+  
+  aes(x = Gold_MOM, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'Gold Returns, %') +
+  
+  stat_regline_equation(label.y = 3000, label.x = -10, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+
+# Between PSEI Monthly Returns and Gold
+
+PSEIr_Gold.plot <- ggplot(DATA_merged) +
+  
+  aes(x = Gold_Ave, y = PSE_MOM) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add horizontal and vertical lines along the origin for visual reference
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'Gold') +
+  
+  stat_regline_equation(label.y = -20, label.x = 500, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEIr_Goldr.plot <- ggplot(DATA_merged) +
+  
+  aes(x = Gold_MOM, y = PSE_MOM) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'Gold Returns, %') +
+  
+  stat_regline_equation(label.y = -20, label.x = -10, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+grid.arrange(PSEI_Gold.plot,PSEI_Goldr.plot, PSEIr_Gold.plot, PSEIr_Goldr.plot, nrow = 2, top = "PSEI and Gold")
+```
+
+### S&P 500
+
+The S&P 500 can be considered as an alternative investment to the PSEI. If such is the case, an negative relationship is to be expected. But looking at the scatter plot and in the simple linear regression, the result is not what is expected. The variation of S&P500 returns is positively associated with the returns of the PSEI and not a negative one.
+
+```{r warning=FALSE, include = FALSE}
+# Plot for daily returns
+
+SP500_DR.plot <- ggplot(SP500) +
+  
+  geom_line(aes(x = Date, y = SP500.DR), colour = "#112446") +
+  
+  labs(x = 'Date', y = 'S&P 500 Daily Returns, %') +
+  theme_grey()
+
+SP500_DR.plot
+```
+
+```{r warning=FALSE, include = FALSE}
+# Moving average
+
+SP500_Monthly$AveReturn.ma <- rollmean(SP500_Monthly$AveReturn, k = 12, fill = NA)
+
+# Plot average monthly returns
+
+SP500_MR.plot <- ggplot(SP500_Monthly) +
+  
+  geom_line(aes(x = Date, y = AveReturn), colour = "grey") +
+  
+  geom_line(aes(x = Date, y = AveReturn.ma), colour = "red") +
+  
+  labs(x = 'Date', y = 'S&P 500 Monthly Returns, %', title = "S&P 500 Monthly Ave. Returns, %, and MA(12)") +
+  
+  theme_grey()
+
+SP500_MR.plot
+```
+
+```{r message = FALSE, warning=FALSE, echo = FALSE}
+# Between PSEI and SP500
+
+PSEI_SP500.plot <- ggplot(DATA_merged) +
+  aes(x = SP500_Ave, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'SP500') +
+  
+  stat_regline_equation(label.y = 3000, label.x = 2000, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEI_SP500MOM.plot <- ggplot(DATA_merged) +
+  
+  aes(x = SP500_MOM, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'SP500 Returns, %') +
+  
+  stat_regline_equation(label.y = 8000, label.x = -20, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+
+# Between PSEI Monthly Returns and SP500
+
+PSEIr_SP500.plot <- ggplot(DATA_merged) +
+  
+  aes(x = SP500_Ave, y = PSE_MOM) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'SP500') +
+  
+  stat_regline_equation(label.y = -15, label.x = 1000, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEIr_SP500MOM.plot <- ggplot(DATA_merged) +
+  
+  aes(x = SP500_MOM, y = PSE_MOM) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'SP500 Returns, %') +
+  
+  stat_regline_equation(label.y = -15, label.x = -10, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+grid.arrange(PSEI_SP500.plot,PSEI_SP500MOM.plot, PSEIr_SP500.plot, PSEIr_SP500MOM.plot, nrow = 2)
+```
+
+### VIX
+
+The Volatility Index (VIX) is an index developed by the Chicago Board Options Exchange (CBOE) as an attempt to measure the market's expectations on the S&P 500 based on the derivative markets. An environment of high volatility may result to fall of equity prices as investors rush for exit. A negative relationship therefore is expected which is reflected in the scatter plot.
+
+```{r include = FALSE}
+VIX.plot <- ggplot(VIX_Monthly) +
+  aes(x = Date, y = VIX_Ave) +
+  geom_line(colour = "#112446") +
+  
+  labs(y = 'VIX Index', x = 'Date') +
+  
+  theme_grey()
+```
+
+```{r warning=FALSE, include = FALSE}
+# Graph for Monthly Rate and Moving Average
+
+VIX_mRate.plot <- ggplot(VIX_Monthly) +
+  
+  geom_line(aes(x = Date, y = VIX_MOM), colour = "grey") +
+  
+  geom_line(aes(x = Date, y = VIX_ma12), colour = "red") +
+  
+  labs(y = 'VIX Index', x = 'Date') +
+  
+  theme_grey()
+```
+
+```{r echo = FALSE}
+# Between PSEI and VIX
+
+PSEI_VIX.plot <- ggplot(DATA_merged) +
+  
+  aes(x = VIX_Ave, y = PSE) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'VIX') +
+  
+  stat_regline_equation(label.y = 8000, label.x = 28, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEI_VIXrm.plot <- ggplot(DATA_merged) +
+  
+  aes(x = VIX_MOM, y = PSE) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'M-o-M Change in VIX, %') +
+  
+  stat_regline_equation(label.y = 8000, label.x = 25, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEI_VIXry.plot <- ggplot(DATA_merged) +
+  
+  aes(x = VIX_YOY, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'Y-o-Y Change in VIX, %') +
+  
+  stat_regline_equation(label.y = 8000, label.x = 50, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEI_VIXma.plot <- ggplot(DATA_merged) +
+  
+  aes(x = VIX_ma12, y = PSE) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI', x = 'VIX, MA=12') +
+  
+  stat_regline_equation(label.y = 4500, label.x = 0, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+grid.arrange(PSEI_VIX.plot, PSEI_VIXrm.plot, PSEI_VIXry.plot, PSEI_VIXma.plot, nrow = 2)
+```
+
+```{r echo = FALSE}
+# Between PSEI Monthly Returns and VIX
+
+PSEIr_VIX.plot <- ggplot(DATA_merged) +
+  aes(x = VIX_Ave, y = PSE_MOM) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'VIX') +
+  
+  stat_regline_equation(label.y = -20, label.x = 10, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEIr_VIXrm.plot <- ggplot(DATA_merged) +
+  
+  aes(x = VIX_MOM, y = PSE_MOM) +
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI returns, %', x = 'M-o-M Change in VIX, %') +
+  
+  stat_regline_equation(label.y = -20, label.x = -25, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEIr_VIXry.plot <- ggplot(DATA_merged) +
+  
+  aes(x = VIX_YOY, y = PSE_MOM) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'Y-o-Y Change in VIX, %') +
+  
+  stat_regline_equation(label.y = -20, label.x = -50, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+
+PSEIr_VIXma.plot <- ggplot(DATA_merged) +
+  
+  aes(x = VIX_ma12, y = PSE_MOM) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "grey") +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSEI Returns, %', x = 'VIX, MA=12') +
+  
+  stat_regline_equation(label.y = -20, label.x = -5, aes(label = paste(..eq.label.., sep = "~~~",..rr.label..))) +
+  
+  theme_grey()
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+grid.arrange(PSEIr_VIX.plot, PSEIr_VIXrm.plot, PSEIr_VIXry.plot, PSEIr_VIXma.plot, nrow = 2)
+```
+
+```{r include = FALSE}
+# Between PSEI Returns and VIX
+PSE_VIXLead1.plot <- ggplot(DATA_merged) +
+  
+  aes(x = lead(VIX_Ave,1), y = PSE_MOM) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "#112446") +
+  
+  # Add horizontal and vertical lines along the origin for visual reference
+  
+  geom_hline(aes(yintercept = 0), color = "black", linetype = "solid", linewidth = 0.8) +
+  
+  geom_vline(aes(xintercept = 0), color = "black", linetype = "solid", linewidth = 0.8) +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSE Index Returns, %', x = 'VIX', title = 'PSE Index Ave. Monthly Returns and BRENT Returns') +
+  
+  stat_regline_equation(label.y = -15, aes(label = ..rr.label..)) +
+  
+  theme_grey()
+```
+
+```{r include = FALSE}
+# Between PSEI Returns and VIX
+PSE_VIXLag1.plot <- ggplot(DATA_merged) +
+  
+  aes(x = lag(VIX_Ave,1), y = PSE_MOM) +
+  
+  geom_point(shape = "circle", size = 1.5, colour = "#112446") +
+  
+  # Add horizontal and vertical lines along the origin for visual reference
+  
+  geom_hline(aes(yintercept = 0), color = "black", linetype = "solid", linewidth = 0.8) +
+  
+  geom_vline(aes(xintercept = 0), color = "black", linetype = "solid", linewidth = 0.8) +
+  
+  # Add a regression line
+  
+  geom_smooth(method = "lm", se = FALSE) +
+  
+  # Labels and themes
+  
+  labs(y = 'PSE Index Returns, %', x = 'VIX', title = 'PSE Index Ave. Monthly Returns and BRENT Returns') +
+  
+  stat_regline_equation(label.y = -15, aes(label = ..rr.label..)) +
+  
+  theme_grey()
+
+PSE_VIXLag1.plot
+```
+
+### Correlations
+
+Among the selected variables[^9], the SP500 returns shows "moderate positive correlation" with the PSEI returns while the monthly change in VIX shows "moderate negative correlation". Among the independent variables, there are notable moderate to high correlations, particularly between inflation and monthly rate of change in CPI, as well as between SP500 returns and monthly rate of change in VIX.
+
+[^9]: Included are the variables which passed the ADF test for stationarity.
+
+```{r fig.width=10, fig.height=10, echo = FALSE}
+# Creating subset for corr
+
+DATA_subsetcorr <- DATA_merged[, c("PSE_MOM", "Inflation", "CPI_MOM", "dRemit", "PHPUSD_dyAve", "PHPUSD_dmAve", "BRENT_MOM", "SP500_MOM", "Gold_MOM", "VIX_MOM")]
+
+r4abep.cor(DATA_subsetcorr)
+```
+
+## 3.3. Econometric Model
+
+The econometric model used for this paper is:
+
+$$
+PSEI_r = \beta_0 + \beta_1F_1 ... + \beta_nF_n + \epsilon
+$$ where $F$ are the macroeconomic and financial indicators that potentially affects the returns of the PSEI.
+
+When the Arbitrage pricing model is employed, the econometric model is adjusted to:
+
+$$
+PSEI_r - R_f = \text{Risk Premium} = \beta_0 + \beta_1F_n... + \beta_nFn + \epsilon
+$$
+
+The indepedent variables ($F$), with their expected signs, includes below:
+
+-   Inflation, % (-)
+-   Rate of change in CPI, % (-)
+-   Rate of change in OFW remittance, % (+)
+-   Rate of change in PHPUSD exchange rate, % (-)
+-   Rate of change in oil price (BRENT), % (+)
+-   SP500 returns, % (+)
+-   Gold returns, % (+)
+-   Rate of change in VIX, % (-)
+
+# 4. Regression Analysis
+
+## 4.1. Estimation of Econometric Model
+
+```{r include = FALSE}
+# Regression with all variables to PSEI returns
+
+PSEIr.lm <- lm(PSE_MOM ~ . -Date -PSE_Vol -PSE_Val -PSE -RP, data = DATA_merged)
+
+summary(PSEIr.lm) # Significant: PSPUSD_dmAve, SP500_MOM, Gold_MOM p-value < 0.05
+```
+
+```{r include = FALSE}
+r4abep.plotlm(PSEIr.lm)
+```
+
+```{r include = FALSE}
+r4abep.vif(PSEIr.lm) # Failed
+
+r4abep.bp(PSEIr.lm) # Failed
+
+r4abep.dw(PSEIr.lm) # Passed
+```
+
+```{r include = FALSE}
+# STEP; using ols_step_forward_aic due to error message
+ols_step_forward_aic(PSEIr.lm)
+```
+
+```{r include = FALSE}
+ols_step_backward_aic(PSEIr.lm)
+```
+
+```{r include = FALSE}
+# Regression with recommended variables from STEP forward
+
+PSEIr_stepforward.lm <- lm(PSE_MOM ~ SP500_MOM + PHPUSD_dmAve + VIX_MOM + VIX_ma12 + SP500_Ave, data = DATA_merged)
+
+summary(PSEIr_stepforward.lm) # Significant : All are significant for 95% CI except for SP500_Ave (significant for 90% CI) Adj, R-squared 0.2871
+```
+
+```{r include = FALSE}
+r4abep.vif(PSEIr_stepforward.lm) # Good, no > 5
+
+r4abep.bp(PSEIr_stepforward.lm) # Failed, p-value = 0.03164
+
+r4abep.dw(PSEIr_stepforward.lm) # Failed, p-value = 0.02171
+
+r4abep.reset(PSEIr_stepforward.lm) # Good, p-value = 0.1205
+```
+
+```{r include = FALSE}
+# Regression with recommended variables from STEP (Backward)
+
+PSEIr_stepbackward.lm <- lm(PSE_MOM ~ CPI + PHPUSD_dmAve + SP500_MOM + VIX_Ave + VIX_End + VIX_MOM + VIX_ma12, data = DATA_merged)
+
+summary(PSEIr_stepbackward.lm) # Significant : All are significant for 95% CI
+```
+
+```{r include = FALSE}
+r4abep.vif(PSEIr_stepbackward.lm) # Failed for VIX
+
+r4abep.bp(PSEIr_stepbackward.lm) # Failed, p-value = 0.00006057
+
+r4abep.dw(PSEIr_stepbackward.lm) # Failed, p-value = 0.02993
+
+r4abep.reset(PSEIr_stepbackward.lm) # Good, p-value = 0.1175
+```
+
+### PSEI returns
+
+Running a linear regression with all of the variables identified the following as significant explanatory variables:
+
+-   PHPUSD_dmAve (-)
+-   SP500_MOM (+)
+-   VIX_Ave (+)
+-   VIX_End (-)
+-   VIX_MOM (-)
+
+Improving from that model, a step-wise regression was dones, which selected the following variables:
+
+-   PHPUSD_dmAve(-)
+-   SP500_MOM(+)
+-   SP500 Ave(-)
+-   VIX_ma12(-)
+-   VIX_MOM(-)
+
+All are independent variables are significant but the regression failed the BP and DW tests. The SP500 and SP500_Ave seem also at odds as there signs are opposite. One possible interpretation is that at high levels of the SP500, investors have incentives to sell PSEI and invest in US equities.
+
+Running a regression for the selected variables in section 3.3, only the following were found to be significant variables:
+
+-   PHPUSD_dmAve (-)
+-   SP500_MOM (+)
+-   VIX_MOM (-)
+
+Further, all show the expected signs except CPI_MOM. The diagnostics show good results despite presence of outliers and influencial data points.
+
+```{r echo = FALSE}
+# Regression of selected variables
+
+PSEIr_select.lm <- lm(PSE_MOM ~ Inflation + CPI_MOM + dRemit + PHPUSD_dmAve + BRENT_MOM + SP500_MOM + Gold_MOM + VIX_MOM, data = DATA_merged)
+
+summary(PSEIr_select.lm)
+```
+
+```{r echo = FALSE, fig.width = 10, fig.height = 10}
+r4abep.plotlm(PSEIr_select.lm)
+```
+
+```{r echo = FALSE}
+r4abep.vif(PSEIr_select.lm) # Good
+
+r4abep.bp(PSEIr_select.lm) # Good; p-value = 0.05213
+
+r4abep.dw(PSEIr_select.lm) # Good; p-value = 0.09978
+
+r4abep.reset(PSEIr_select.lm) # Good; p-value = 0.2349
+```
+
+```{r echo = FALSE}
+r4abep.influence(PSEIr_select.lm)
+```
+
+```{r echo = FALSE}
+Inf_Points <- DATA_merged[c(46,55,69,183,185),c("Date","PSE_MOM","Inflation","CPI_MOM","dRemit","PHPUSD_dmAve","BRENT_MOM","SP500_MOM","Gold_MOM","VIX_MOM")]
+
+Inf_Points
+```
+
+Running a step-wise regression recommends to use SP500_MOM, PHPUSD_dmAve, VIX_MOM and Gold_MOM as the explanatory variables which was all found to be significant. However, the revised regression fails the BP and RESET test.
+
+```{r include = FALSE}
+r4abep.step(PSEIr_select.lm, "forward", "AIC")
+```
+
+```{r}
+PSEIr_select2.lm <- lm(PSE_MOM ~ SP500_MOM + PHPUSD_dmAve + VIX_MOM, data = DATA_merged)
+
+summary(PSEIr_select2.lm)
+```
+
+```{r fig.width = 10, fig.height = 10}
+r4abep.plotlm(PSEIr_select2.lm)
+```
+
+```{r}
+r4abep.vif(PSEIr_select2.lm) # Good
+
+r4abep.bp(PSEIr_select2.lm) # Failed: p-value = 0.03007
+
+r4abep.dw(PSEIr_select2.lm) # Good; p-value = 0.06797
+
+r4abep.reset(PSEIr_select2.lm) # Failed; p-value = 0.03077
+```
+
+To address the violations of the linear regression assumption, VIX_MOM is squared. The revised regression passed all the diagnostic tests.
+
+```{r echo = FALSE}
+PSEIr_select3.lm <- lm(PSE_MOM ~ SP500_MOM + PHPUSD_dmAve + I(VIX_MOM^2), data = DATA_merged)
+
+summary(PSEIr_select3.lm)
+```
+
+```{r fig.width = 10, fig.height = 10, echo = FALSE}
+r4abep.plotlm(PSEIr_select3.lm)
+```
+
+```{r echo = FALSE}
+r4abep.vif(PSEIr_select3.lm) # Good
+
+r4abep.bp(PSEIr_select3.lm) # Good
+
+r4abep.dw(PSEIr_select3.lm) # Good
+
+r4abep.reset(PSEIr_select3.lm) # Good
+```
+
+Below are the econometric model which passed the diagnostics:
+
+$$
+PSEI_r = 0.69 + 0.30 \times SP500_r - 0.11 \times Inflation + 0.34 \times CPI_{dm} + 0.03 dRemit\\
+ - 0.68 PHPUSD_{dm} - 0.02 BRENT_{dm} + 0.02 Gold_r - 0.06 VIX_{dm} + \epsilon
+$$
+
+and
+
+$$
+PSEI_r = 0.59 + 0.41 \times SP500_r - 0.81 \times PHPUSD_{dm} - 0.0004 \times VIX_{dm}^2 + \epsilon
+$$
+
+```{r include = FALSE}
+PSE.lm <- lm(PSE ~ . - PSE_Vol - PSE_Val - PSE_MOM - Date, data = DATA_merged)
+
+summary(PSE.lm)
+```
+
+```{r include = FALSE}
+r4abep.step(PSE.lm, "backward", "AIC")
+```
+
+```{r include = FALSE}
+PSEver2.lm <- lm(PSE ~ Inflation + PHPUSD_Ave + BRENT_Ave + SP500_Ave + Gold_Ave + EER + VIX_Ave, data = DATA_merged)
+
+summary(PSEver2.lm)
+```
+
+```{r include = FALSE, fig.width = 10, fig.height = 10}
+r4abep.plotlm(PSEver2.lm)
+```
+
+```{r include = FALSE}
+r4abep.vif(PSEver2.lm) # Failed
+
+r4abep.bp(PSEver2.lm) # Failed; p-value = 0.000222
+
+r4abep.dw(PSEver2.lm) # Failed; p-value = < 0.00000000000000022
+
+r4abep.reset(PSEver2.lm) # Failed; p-value = < 0.00000000000000022
+```
+
+### Risk premium
+
+Considering the Arbitrage Pricing Model with Tbill_all as a proxy of risk free rate, among the selected variables (as identified in section 3.3), only the following found to be significant explanatory variables:
+
+-   Inflation (-)
+-   SP500 MOM (+)
+-   VIX_MOM (-)
+
+Improving the initial model using step-wise regression, all of the proposed variables are significant except the PHPUSD_dmAve but fails the diagnostics for BP and RESET tests:
+
+-   SP500_MOM (+)
+-   Inflation (-)
+-   VIX_MOM (-)
+-   PHPUSD_dmAve (-)
+
+```{r include = FALSE}
+RP_select.lm <- lm(RP ~ Inflation + CPI_MOM + dRemit + PHPUSD_dmAve + 
+    BRENT_MOM + SP500_MOM + Gold_MOM + VIX_MOM, data = DATA_merged)
+
+summary(RP_select.lm)
+```
+
+```{r fig.width = 10, fig.height = 10, include = FALSE}
+r4abep.plotlm(RP_select.lm)
+```
+
+```{r include = FALSE}
+r4abep.vif(RP_select.lm) # Good
+
+r4abep.bp(RP_select.lm) # Good; p-value = 0.07581
+
+r4abep.dw(RP_select.lm) # Good; p-value = 0.7267
+
+r4abep.reset(RP_select.lm) # Good; p-value = 0.09353
+```
+
+```{r include = FALSE}
+r4abep.step(RP_select.lm,"forward","AIC")
+```
+
+```{r include = FALSE}
+r4abep.step(RP_select.lm,"backward","AIC")
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# Using the variables from the STEP operation - forward
+
+RP_select2.lm <- lm(RP ~ SP500_MOM + Inflation + VIX_MOM + PHPUSD_dmAve, data = DATA_merged)
+
+summary(RP_select2.lm)
+```
+
+```{r fig.width = 10, fig.height = 10, echo = FALSE, warning = FALSE, message = FALSE}
+r4abep.plotlm(RP_select2.lm)
+```
+
+```{r echo = FALSE, message = FALSE}
+r4abep.vif(RP_select2.lm) # Good
+
+r4abep.bp(RP_select2.lm) # Failed
+
+r4abep.dw(RP_select2.lm) # Good
+
+r4abep.reset(RP_select2.lm) # Good
+```
+
+Adding back some of the variables and changing the functional form resulted in acceptable diagnostic results but only a handful variables are found to be significant.
+
+-   SP500_MOM (+)
+-   I($Inflation^2$) (-)
+-   I($\text{VIX_MOM}^2$) (-)
+-   PHPUSD_dmAve (-)
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# Improving the regression from stepwise
+
+RP_select3.lm <- lm(RP ~ SP500_MOM + I(Inflation^2) + I(VIX_MOM^2) + PHPUSD_dmAve + I(dRemit^2) + log(BRENT_Ave) + log(Gold_Ave), data = DATA_merged)
+
+summary(RP_select3.lm)
+```
+
+```{r message = FALSE, warning = FALSE, echo = FALSE, fig.width = 10, fig.height = 10}
+r4abep.plotlm(RP_select3.lm)
+```
+
+```{r echo = FALSE, message = FALSE}
+r4abep.vif(RP_select3.lm) # Good
+
+r4abep.bp(RP_select3.lm) # Good; p-value = 0.05582
+
+r4abep.dw(RP_select3.lm) # Good; p-value = 0.9476
+
+r4abep.reset(RP_select3.lm) # Good; p-value = 0.09078
+```
+
+Based on the regression analysis, the econometric model with APM is
+
+$$
+\text{Risk Premium} = - 11.25 + 0. 409 \times SP500_r - 0.058 \times Inflation^2 - 0.518 \times PHPUSD_r \\
+  - 0.001 \times dRemit^2 + 0.764 \times \log(BRENT)  + 0.911 \times \log(Gold)\\
+ - 0.0004 \times VIX_{dm}^2 + \epsilon
+$$
+
+which can be re-written as
+
+$$
+PSEI_r = R_f  - 11.25 + 0.409 \times SP500_r - 0.058 \times \text{Inflation}^2 - 0.518 \times PHPUSD_r \\
+  - 0.001 \times dRemit^2 + 0.764 \times \log(BRENT)  + 0.911 \times \log(Gold)\\
+ - 0.0004 \times VIX_{dm}^2 + \epsilon
+$$
+
+### Quarterly data series
+
+Running a regression on the quarterly data series found that only the CES_CurrentQ as the significant variable with a very small goodness of fit. The sign is also not as expected which may indicate that consumer optimism is likely to go to increased spending and not to increased funds going to the financial markets.
+
+```{r include = FALSE}
+PSEIr_Qtrly.lm <- lm(PSE_MOM ~ dRGDP + Inf_Quarter + BES_CurrentQ + BES_NextQ + BES_Next12M +          CES_CurrentQ + CES_NextQ + CES_Next12M, data = BSP_Qtrly)
+
+summary(PSEIr_Qtrly.lm)
+```
+
+```{r include = FALSE}
+r4abep.step(PSEIr_Qtrly.lm,"forward","AIC")
+```
+
+```{r include = FALSE}
+PSEIr_Qtrlystep.lm <- lm(PSE_MOM ~ CES_CurrentQ + dRGDP, data = BSP_Qtrly)
+
+summary(PSEIr_Qtrlystep.lm)
+```
+
+```{r include = FALSE}
+r4abep.plotlm(PSEIr_Qtrlystep.lm)
+```
+
+```{r include = FALSE}
+r4abep.vif(PSEIr_Qtrlystep.lm) # Good
+
+r4abep.bp(PSEIr_Qtrlystep.lm) # Good
+
+r4abep.dw(PSEIr_Qtrlystep.lm) # Good
+
+r4abep.reset(PSEIr_Qtrlystep.lm) # Failed
+```
+
+```{r include = FALSE}
+PSEIr_Qtrlystep2.lm <- lm(PSE_MOM ~ CES_CurrentQ + BES_CurrentQ + dRGDP, data = BSP_Qtrly)
+
+summary(PSEIr_Qtrlystep2.lm)
+```
+
+```{r include = FALSE}
+r4abep.plotlm(PSEIr_Qtrlystep2.lm)
+```
+
+```{r include = FALSE}
+r4abep.vif(PSEIr_Qtrlystep2.lm) # Good
+
+r4abep.bp(PSEIr_Qtrlystep2.lm) # Good
+
+r4abep.dw(PSEIr_Qtrlystep2.lm) # Good
+
+r4abep.reset(PSEIr_Qtrlystep2.lm) # Failed
+```
+
+Exploring the univariate relations between the PSEI returns and the growth of the gross domestic product
+
+```{r include = FALSE}
+PSEIr_GDP.lm <- lm(PSE_MOM ~ dRGDP, data = DATA_Qtrly)
+
+summary(PSEIr_GDP.lm)
+```
+
+```{r include = FALSE}
+GDP_PSEIr.lm <- lm( dRGDP ~ PSE_MOM, data = DATA_Qtrly)
+
+summary(GDP_PSEIr.lm)
+```
+
+```{r include = FALSE}
+GDP_lm <- lm(dRGDP ~ lag(PSE_MOM,1), data = DATA_Qtrly)
+
+summary(GDP_lm)
+```
+
+```{r include = FALSE}
+r4abep.plotlm(GDP_lm)
+```
+
+```{r include = FALSE}
+r4abep.bp(GDP_lm) # p-value = 0.02, Failed
+
+r4abep.dw(GDP_lm) # DW = 0.58363, Failed
+
+r4abep.reset(GDP_lm) # p-value = < 0.0001, Failed
+```
+
+## 4.2. Hypothesis Testing and Validation
+
+Below is the summary of the diagnostics results from the regresion models:
+
+| Regression model      | VIF    | BP     | DW     | RESET  |
+|-----------------------|--------|--------|--------|--------|
+| PSEIr.lm              | Passed | Failed | Failed | Failed |
+| PSEIr_stepforward.lm  | Passed | Failed | Failed | Passed |
+| PSEIr_stepbackward.lm | Failed | Failed | Failed | Passed |
+| PSEIr_select.lm       | Passed | Passed | Passed | Passed |
+| PSEIr_select2.lm      | Passed | Failed | Passed | Failed |
+| PSEIr_select3.lm      | Passed | Passed | Passed | Passed |
+| RP_select.lm          | Passed | Passed | Passed | Passed |
+| RP_select2.lm         | Passed | Failed | Passed | Failed |
+| RP_select3.lm         | Passed | Passed | Passed | Passed |
+
+: Diagnostic results of the regression models
+
+```{r echo = FALSE}
+r4abep.comparelm(PSEIr_select.lm, PSEIr_select3.lm, RP_select.lm, RP_select3.lm)
+```
+
+Based on the comparison of the regression model above, I choose the first (2) and fourth (4) models for predictions.
+
+## 4.3. Forecasting and Prediction
+
+Recalling the econometric model for the PSEI returns, the relationship between the changes in the independent variables and the expected monthly returns to the PSEI are as follows:
+
+$$
+PSEI_r = 0.59 + 0.41 \times SP500_r - 0.81 \times PHPUSD_{dm} - 0.0004 \times VIX_{dm}^2 + \epsilon
+$$
+
+-   a percentage increase (decrease) in the the SP500 will result to 0.41 percentage increase (decrease) of the PSEI returns;
+
+-   a percentage increase(decrease) of PHP = 1 USD rate will result to a 0.81 percentage decrease (increase) of the PSEI returns; and
+
+-   a percentage increase of the VIX index squared results to a 0.04 (0.0004%) basis points decrease (increase) of the PSEI returns.
+
+For the significant variables of the model using the Arbitrage Pricing framework:
+
+$$
+PSEI_r = R_f  - 11.25 + 0.409 \times SP500_r - 0.058 \times \text{Inflation}^2 - 0.518 \times PHPUSD_r \\
+  - 0.001 \times dRemit^2 + 0.764 \times \log(BRENT)  + 0.911 \times \log(Gold)\\
+ - 0.0004 \times VIX_{dm}^2 + \epsilon
+$$
+
+-   a percentage increase (decrease) in the the SP500 will result to 0.409 percentage increase (decrease) of the PSEI returns;
+
+-   a percentage increase (decrease) of inflation squared will induce a 0.058 percentage decrease (increase) in the PSEI returns;
+
+-   a percentage increase (decrease) of the VIX index squared will induce a 0.04 (0.0004%) basis point decrease (increase) of the PSEI returns; and
+
+-   a percentage increase(decrease) of PHP = 1 USD rate will result to a 0.518 percentage decrease (increase) of the PSEI returns.
+
+The following insignificant variables that are nevertheless in the model:
+
+-   a percentage increase (decrease) of remittance will result to a 0.1 basis point decrease (increase) in the PSEI returns;
+
+-   a percentage increase (decrease) of crude oil price will induce to a 0.764 increase (decrease) in returns; and
+
+-   a percentage increase (decrease) in the price of gold will induce to a 0.911 increase (decrease) in returns.
+
+As an illustration, if the SP500 is expected to increase by 2.5% next month, the PHP = 1 USD rate will increase by 0.68%, Gold price will not be changing, while VIX is expected to dissipate by 5%. With those assumptions, PSEI is expected to grow by 1.07%.[^10]
+
+[^10]: With a lower bound of 0.3% and an upper bound of 1.8%.
+
+```{r include = FALSE}
+newdata1 <- data.frame(
+  SP500_MOM = 2.5,
+  PHPUSD_dmAve = 0.68,
+  VIX_MOM = -5,
+  Gold_MOM = 0
+)
+
+r4abep.predict(PSEIr_select3.lm, newdata1)
+```
+
+```{r include = FALSE}
+# ShinyApp for the regression model (2)
+
+source("Functions/Predictver1.R")
+
+shinyApp(ui = ui, server = server)
+```
+
+Supposed that, in addition to the aforementioned assumptions, the following variables are to be expected next month:
+
+-   Risk free rate = 6.3%;
+
+-   Inflation rate = 3.5%;
+
+-   OFW remmittance growth = 1%;
+
+-   Price of oil = \$80; and
+
+-   Price of gold = \$2,385.7.
+
+The value the regression model will give is -0.9[^11], which, when added to the risk free rate is equal to 5.4%.[^12]
+
+[^11]: With a lowerbound of -2.2 and an upper bound of 0.5.
+
+[^12]: Lower bound is 4.1% while the upper bound is 6.8%.
+
+```{r include = FALSE}
+newdata2 <- data.frame(
+  SP500_MOM = 2.5,
+  Inflation = 3.5,
+  VIX_MOM = -5,
+  PHPUSD_dmAve = 0.68,
+  dRemit = 1,
+  BRENT_Ave = 80,
+  Gold_Ave = 2385.7
+)
+
+r4abep.predict(RP_select3.lm, newdata2)
+```
+
+```{r include = FALSE}
+# ShinyApp for the regression model (4)
+
+source("Functions/Predictver2.R")
+
+shinyApp(ui = ui, server = server)
+```
+
+# 5. Application and Recommendations
+
+## 5.1. Model Applications
+
+In reference to the research questions asked earlier, it is the SP500 which has a positive relationship with the PSEI returns. Inflation, the PHP = 1 USD exchange rate, and the rate of change of VIX all have negative relationship with the latter.
+
+Those found to have no significant relationship with the returns of the PSEI are the growth of the remittance and the prices of oil and gold.
+
+Considering the significant variables, it is perhaps the forex rate which has some practical applications. Given that SP500 has a positive $\beta$, it is not therefore a counter-cyclical for PSEI. And VIX, given that is determined using the prices of options for the SP500, would certainly affects US equities.
+
+## 5.2. Recommendations
+
+The study is limited on the linear regression relationship between macroeconomic variables and financial indicators with the main index of the PSE. Given an $R^2$ of 0.25 to 0.30, the model could only explain a quarter of the variation of the PSEI returns.
+
+It could be argued that a lot of what was left unexplained are idiosyncrasies. But, more often than not, we would hear from the news on movements in the stock market having to do with events in the macroeconomy. Usually, they are just even announcements, or sometimes in anticipation, and still sometimes, as a counter-reaction to better-than-expected (or worse-than-expected) statistics. We all know how the stock market can be volatile. Models like the ones presented in this paper is not that very helpful in trading especially with high-frequency trading induced by supercomputers.
+
+A better model suited for the dynamic nature of stock markets returns is needed. It should capture the change in behavior when an event is expected, the actual event, and what happened after some period. The model is expected to be non-linear. And it should also incorporates shifts of the curve(s).
+
+However, if limited to understanding the linear relationship between the variables, one way to further improve the study is by analyzing for each sub-index of the PSEI. Perhaps that has a more practical use in determining which among the sub-index moves in the opposite direction.
+
+# References
